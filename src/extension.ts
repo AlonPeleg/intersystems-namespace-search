@@ -5,240 +5,349 @@ interface MatchResult {
     line: number;
     column: number;
     lineText: string;
-    uri: vscode.Uri;
+    uri: string;
 }
 
-const DIR_CONCURRENCY = 8;
-const FILE_CONCURRENCY = 12;
-
-class FileResultTreeItem extends vscode.TreeItem {
-    constructor(
-        public readonly fileName: string,
-        public readonly uri: vscode.Uri,
-        public readonly matches: MatchResult[]
-    ) {
-        super(fileName, vscode.TreeItemCollapsibleState.Expanded);
-        this.description = `${matches.length} match${matches.length > 1 ? 'es' : ''}`;
-        this.iconPath = vscode.ThemeIcon.File;
-        this.resourceUri = uri;
-    }
-}
-
-class MatchResultTreeItem extends vscode.TreeItem {
-    constructor(public readonly match: MatchResult) {
-        super(match.lineText.trim(), vscode.TreeItemCollapsibleState.None);
-        this.description = `line ${match.line + 1}`;
-        this.iconPath = new vscode.ThemeIcon('symbol-property');
-        
-        this.command = {
-            command: 'vscode.open',
-            title: 'Open Match',
-            arguments: [
-                match.uri,
-                {
-                    selection: new vscode.Range(match.line, match.column, match.line, match.column),
-                    preview: true
-                }
-            ]
-        };
-    }
-}
-
-class ISFSSearchTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<vscode.TreeItem | undefined | null | void>();
-    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-    private resultsMap: Map<string, MatchResult[]> = new Map();
-    private uriMap: Map<string, vscode.Uri> = new Map();
-
-    clear(): void {
-        this.resultsMap.clear();
-        this.uriMap.clear();
-        this._onDidChangeTreeData.fire();
-    }
-
-    addMatches(fileUri: vscode.Uri, matches: MatchResult[]): void {
-        if (matches.length === 0) return;
-        const key = fileUri.path;
-        this.resultsMap.set(key, matches);
-        this.uriMap.set(key, fileUri);
-        this._onDidChangeTreeData.fire();
-    }
-
-    getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
-        return element;
-    }
-
-    async getChildren(element?: vscode.TreeItem): Promise<vscode.TreeItem[]> {
-        if (!element) {
-            const items: FileResultTreeItem[] = [];
-            for (const [key, matches] of this.resultsMap.entries()) {
-                const uri = this.uriMap.get(key)!;
-                const fileName = key.split('/').pop() || key;
-                items.push(new FileResultTreeItem(fileName, uri, matches));
-            }
-            return items;
-        }
-
-        if (element instanceof FileResultTreeItem) {
-            return element.matches.map(m => new MatchResultTreeItem(m));
-        }
-
-        return [];
-    }
-}
+const DIR_CONCURRENCY = 2;
+const FILE_CONCURRENCY = 2;
+const PAUSE_BETWEEN_READS_MS = 15;
 
 export function activate(context: vscode.ExtensionContext) {
-    const outputChannel = vscode.window.createOutputChannel("InterSystems Namespace Search");
-    const treeProvider = new ISFSSearchTreeProvider();
-    
-    vscode.window.registerTreeDataProvider('isfsNamespaceSearchView', treeProvider);
+    const provider = new ISFSSearchWebviewProvider(context.extensionUri);
 
-    const clearCommand = vscode.commands.registerCommand('intersystems-namespace-search.clearResults', () => {
-        treeProvider.clear();
-        outputChannel.appendLine("Search results cleared.");
-    });
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider('isfsNamespaceSearchView', provider)
+    );
+}
 
-    const searchCommand = vscode.commands.registerCommand('intersystems-namespace-search.searchInNamespace', async () => {
+export function deactivate() {}
+
+class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
+    private _view?: vscode.WebviewView;
+    private _cancellationTokenSource?: vscode.CancellationTokenSource;
+
+    constructor(private readonly _extensionUri: vscode.Uri) {}
+
+    public resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken
+    ) {
+        this._view = webviewView;
+
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this._extensionUri]
+        };
+
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+        webviewView.webview.onDidReceiveMessage(async (data) => {
+            switch (data.type) {
+                case 'startSearch': {
+                    this.cancelCurrentSearch();
+                    this._cancellationTokenSource = new vscode.CancellationTokenSource();
+                    this.executeThrottledSearch(data.query, data.mask, this._cancellationTokenSource.token);
+                    break;
+                }
+                case 'stopSearch': {
+                    this.cancelCurrentSearch();
+                    break;
+                }
+                case 'openMatch': {
+                    const uri = vscode.Uri.parse(data.uri);
+                    const doc = await vscode.workspace.openTextDocument(uri);
+                    const editor = await vscode.window.showTextDocument(doc, { preview: true });
+                    const pos = new vscode.Position(data.line, data.column);
+                    editor.selection = new vscode.Selection(pos, pos);
+                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+                    break;
+                }
+            }
+        });
+    }
+
+    private cancelCurrentSearch() {
+        if (this._cancellationTokenSource) {
+            this._cancellationTokenSource.cancel();
+            this._cancellationTokenSource.dispose();
+            this._cancellationTokenSource = undefined;
+        }
+    }
+
+    private async executeThrottledSearch(query: string, mask: string, token: vscode.CancellationToken) {
+        if (!this._view) return;
+
         const isfsFolders = vscode.workspace.workspaceFolders?.filter(
             f => f.uri.scheme === 'isfs' || f.uri.scheme === 'isfs-readonly'
         );
 
         if (!isfsFolders || isfsFolders.length === 0) {
-            vscode.window.showErrorMessage("No active ISFS namespace found. Please connect to an InterSystems server.");
+            this._view.webview.postMessage({ type: 'error', message: 'No active ISFS workspace folder found.' });
             return;
         }
 
-        let selectedFolder = isfsFolders[0];
-        if (isfsFolders.length > 1) {
-            const picks = isfsFolders.map(f => ({
-                label: f.name,
-                description: `${f.uri.scheme}://${f.uri.authority}`,
-                folder: f
-            }));
-            const selection = await vscode.window.showQuickPick(picks, { placeHolder: "Select Namespace / Server:" });
-            if (!selection) return;
-            selectedFolder = selection.folder;
-        }
+        const folder = isfsFolders[0];
+        const nameFilterRegex = convertLocationInputToRegex(mask);
+        const searchRegex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
 
-        const searchQuery = await vscode.window.showInputBox({
-            prompt: "Search string",
-            placeHolder: "e.g., SetTavla or test123"
-        });
-        if (!searchQuery) return;
+        this._view.webview.postMessage({ type: 'searchStarted' });
 
-        const locationInput = await vscode.window.showInputBox({
-            prompt: "Search in (File mask or Package)",
-            placeHolder: "e.g., WBLRSHOW*.int OR *.cls,*.int OR Tafnit.Universe.*",
-            value: "*.cls,*.mac,*.int"
-        });
-        if (locationInput === undefined) return;
+        try {
+            const targetFiles = await collectMatchingFiles(folder.uri, nameFilterRegex, token);
 
-        const nameFilterRegex = convertLocationInputToRegex(locationInput);
+            if (token.isCancellationRequested) {
+                this._view.webview.postMessage({ type: 'searchStopped', message: 'Search cancelled.' });
+                return;
+            }
 
-        treeProvider.clear();
-        outputChannel.clear();
-        outputChannel.appendLine(`=== InterSystems Namespace Search ===`);
-        outputChannel.appendLine(`Folder: ${selectedFolder.uri.toString()}`);
-        outputChannel.appendLine(`Search text: "${searchQuery}"`);
-        outputChannel.appendLine(`File mask: "${locationInput}"`);
-        outputChannel.appendLine(`Resolved mask regex: ${nameFilterRegex}`);
-        outputChannel.show(true);
+            this._view.webview.postMessage({ type: 'statusUpdate', message: `Found ${targetFiles.length} file(s). Scanning...` });
 
-        // Focus sidebar panel right away so user sees results appearing live
-        vscode.commands.executeCommand('isfsNamespaceSearchView.focus');
+            let processed = 0;
+            let totalMatches = 0;
 
-        // Runs inside window.withProgress with location Notification to keep status visible without blocking UI
-        vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: `Searching "${searchQuery}" in ${selectedFolder.name}...`,
-            cancellable: true
-        }, async (progress, token) => {
-            const stats = { dirsListed: 0, dirErrors: 0, filesMatched: 0, filesRead: 0, readErrors: 0, totalMatches: 0 };
+            await runWithConcurrency(targetFiles, FILE_CONCURRENCY, token, async (fileUri) => {
+                if (token.isCancellationRequested) return;
 
-            try {
-                progress.report({ message: 'Listing files...' });
-                const targetFiles = await collectMatchingFiles(selectedFolder.uri, nameFilterRegex, token, outputChannel, stats);
+                try {
+                    await sleep(PAUSE_BETWEEN_READS_MS);
 
-                outputChannel.appendLine(`\nDirectories listed: ${stats.dirsListed} (errors: ${stats.dirErrors})`);
-                outputChannel.appendLine(`Files matching mask: ${targetFiles.length}`);
+                    const fileBytes = await vscode.workspace.fs.readFile(fileUri);
+                    const content = new TextDecoder('utf-8').decode(fileBytes);
+                    const lines = content.split(/\r?\n/);
+                    const matches: MatchResult[] = [];
 
-                if (targetFiles.length === 0) {
-                    outputChannel.appendLine(`\nNo files matched mask "${locationInput}".`);
-                    vscode.window.showWarningMessage(`No files matched mask "${locationInput}".`);
-                    return;
-                }
-
-                const searchRegex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                let processedCount = 0;
-
-                await runWithConcurrency(targetFiles, FILE_CONCURRENCY, async (fileUri) => {
-                    if (token.isCancellationRequested) return;
-                    processedCount++;
-                    stats.filesRead++;
-                    
-                    progress.report({
-                        message: `Scanning ${processedCount} of ${targetFiles.length} files`,
-                        increment: (1 / targetFiles.length) * 100
+                    lines.forEach((lineText, lineIdx) => {
+                        const regexCopy = new RegExp(searchRegex.source, searchRegex.flags);
+                        let match: RegExpExecArray | null;
+                        while ((match = regexCopy.exec(lineText)) !== null) {
+                            const fileName = fileUri.path.split('/').pop() || 'Unknown';
+                            matches.push({
+                                fileName,
+                                line: lineIdx,
+                                column: match.index,
+                                lineText: lineText.trim(),
+                                uri: fileUri.toString()
+                            });
+                            totalMatches++;
+                            if (!regexCopy.global) break;
+                        }
                     });
 
-                    try {
-                        const fileBytes = await vscode.workspace.fs.readFile(fileUri);
-                        const content = new TextDecoder('utf-8').decode(fileBytes);
-                        const lines = content.split(/\r?\n/);
-                        const fileMatches: MatchResult[] = [];
-
-                        lines.forEach((lineText, lineIdx) => {
-                            const regexCopy = new RegExp(searchRegex.source, searchRegex.flags);
-                            let match: RegExpExecArray | null;
-                            while ((match = regexCopy.exec(lineText)) !== null) {
-                                const fileName = getFileNameFromUri(fileUri);
-                                fileMatches.push({
-                                    fileName,
-                                    line: lineIdx,
-                                    column: match.index,
-                                    lineText,
-                                    uri: fileUri
-                                });
-                                stats.totalMatches++;
-                                if (!regexCopy.global) break;
-                            }
+                    if (matches.length > 0 && this._view && !token.isCancellationRequested) {
+                        this._view.webview.postMessage({
+                            type: 'addMatches',
+                            fileName: fileUri.path.split('/').pop() || 'Unknown',
+                            uri: fileUri.toString(),
+                            matches
                         });
-
-                        if (fileMatches.length > 0) {
-                            treeProvider.addMatches(fileUri, fileMatches);
-                        }
-                    } catch (readErr) {
-                        stats.readErrors++;
-                        outputChannel.appendLine(`Skip/Error reading ${fileUri.path}: ${readErr}`);
                     }
-                }, token);
-
-                outputChannel.appendLine(`\nFiles read: ${stats.filesRead} (read errors: ${stats.readErrors})`);
-                outputChannel.appendLine(`Search complete. Found ${stats.totalMatches} total matches.`);
-
-                if (stats.totalMatches === 0) {
-                    vscode.window.showInformationMessage(
-                        `Scanned ${targetFiles.length} matching files but found no occurrences of "${searchQuery}".`
-                    );
+                } catch {
+                    // Ignore transient file read errors
+                } finally {
+                    processed++;
+                    if (this._view && processed % 5 === 0 && !token.isCancellationRequested) {
+                        this._view.webview.postMessage({
+                            type: 'statusUpdate',
+                            message: `Scanned ${processed} / ${targetFiles.length} files...`
+                        });
+                    }
                 }
-            } catch (err) {
-                outputChannel.appendLine(`Execution error: ${err}`);
-                vscode.window.showErrorMessage(`InterSystems Namespace Search failed: ${err}`);
+            });
+
+            if (token.isCancellationRequested) {
+                this._view.webview.postMessage({ type: 'searchStopped', message: 'Search cancelled.' });
+            } else {
+                this._view.webview.postMessage({
+                    type: 'searchCompleted',
+                    message: `Complete. Found ${totalMatches} match(es) across ${targetFiles.length} files.`
+                });
+            }
+
+        } catch (err: any) {
+            this._view.webview.postMessage({ type: 'error', message: `Search error: ${err.message}` });
+        }
+    }
+
+    private _getHtmlForWebview(webview: vscode.Webview): string {
+        return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: var(--vscode-font-family); padding: 10px; color: var(--vscode-foreground); background-color: var(--vscode-sideBar-background); }
+        .input-group { margin-bottom: 8px; }
+        label { display: block; font-size: 11px; margin-bottom: 3px; font-weight: bold; opacity: 0.8; }
+        input[type="text"] {
+            width: 100%; box-sizing: border-box; background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border);
+            padding: 5px; font-size: 12px; border-radius: 2px; outline: none;
+        }
+        input[type="text"]:focus { border-color: var(--vscode-focusBorder); }
+        .btn-row { display: flex; gap: 5px; margin-top: 6px; }
+        button {
+            flex: 1; background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+            border: none; padding: 6px; font-size: 12px; cursor: pointer; border-radius: 2px; font-weight: bold;
+        }
+        button:hover { background: var(--vscode-button-hoverBackground); }
+        button#stopBtn { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); display: none; }
+        button#stopBtn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+        #status { font-size: 11px; margin: 10px 0; color: var(--vscode-descriptionForeground); font-style: italic; }
+        .file-group { margin-bottom: 10px; }
+        .file-header { font-weight: bold; font-size: 12px; color: var(--vscode-symbolIcon-fileForeground, #3794ff); margin-bottom: 2px; word-break: break-all; }
+        .match-item {
+            font-size: 11px; padding: 3px 6px; cursor: pointer; background: var(--vscode-list-hoverBackground);
+            margin-bottom: 2px; border-radius: 2px; font-family: var(--vscode-editor-font-family); word-break: break-all;
+        }
+        .match-item:hover { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+        .line-num { color: var(--vscode-descriptionForeground); font-size: 10px; margin-right: 5px; }
+    </style>
+</head>
+<body>
+    <div class="input-group">
+        <label>SEARCH TEXT</label>
+        <input type="text" id="query" placeholder="Search term..." />
+    </div>
+    <div class="input-group">
+        <label>FILE MASK / PACKAGE</label>
+        <input type="text" id="mask" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio.utils.cls OR *.cls" />
+    </div>
+    <div class="btn-row">
+        <button id="searchBtn">Search</button>
+        <button id="stopBtn">Stop</button>
+    </div>
+
+    <div id="status">Ready</div>
+    <div id="results"></div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        const queryInput = document.getElementById('query');
+        const maskInput = document.getElementById('mask');
+        const searchBtn = document.getElementById('searchBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusDiv = document.getElementById('status');
+        const resultsDiv = document.getElementById('results');
+
+        searchBtn.addEventListener('click', () => {
+            const query = queryInput.value.trim();
+            const mask = maskInput.value.trim();
+            if (!query) return;
+
+            resultsDiv.innerHTML = '';
+            vscode.postMessage({ type: 'startSearch', query, mask });
+        });
+
+        stopBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'stopSearch' });
+        });
+
+        window.addEventListener('message', event => {
+            const msg = event.data;
+            switch (msg.type) {
+                case 'searchStarted':
+                    statusDiv.textContent = 'Listing files...';
+                    searchBtn.style.display = 'none';
+                    stopBtn.style.display = 'block';
+                    break;
+                case 'statusUpdate':
+                    statusDiv.textContent = msg.message;
+                    break;
+                case 'addMatches':
+                    renderFileMatches(msg.fileName, msg.uri, msg.matches);
+                    break;
+                case 'searchCompleted':
+                case 'searchStopped':
+                case 'error':
+                    statusDiv.textContent = msg.message || 'Stopped';
+                    searchBtn.style.display = 'block';
+                    stopBtn.style.display = 'none';
+                    break;
             }
         });
-    });
 
-    context.subscriptions.push(searchCommand, clearCommand, outputChannel);
+        function renderFileMatches(fileName, uri, matches) {
+            const group = document.createElement('div');
+            group.className = 'file-group';
+
+            const header = document.createElement('div');
+            header.className = 'file-header';
+            header.textContent = '📄 ' + fileName + ' (' + matches.length + ')';
+            group.appendChild(header);
+
+            matches.forEach(m => {
+                const item = document.createElement('div');
+                item.className = 'match-item';
+                item.innerHTML = '<span class="line-num">:' + (m.line + 1) + '</span>' + escapeHtml(m.lineText);
+                item.addEventListener('click', () => {
+                    vscode.postMessage({ type: 'openMatch', uri: m.uri, line: m.line, column: m.column });
+                });
+                group.appendChild(item);
+            });
+
+            resultsDiv.appendChild(group);
+        }
+
+        function escapeHtml(text) {
+            return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+    </script>
+</body>
+</html>`;
+    }
 }
 
-export function deactivate() {}
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function collectMatchingFiles(
+    dirUri: vscode.Uri,
+    nameFilterRegex: RegExp,
+    token: vscode.CancellationToken
+): Promise<vscode.Uri[]> {
+    const fileUris: vscode.Uri[] = [];
+
+    async function walk(currentUri: vscode.Uri) {
+        if (token.isCancellationRequested) return;
+
+        let entries: [string, vscode.FileType][];
+        try {
+            await sleep(PAUSE_BETWEEN_READS_MS);
+            entries = await vscode.workspace.fs.readDirectory(currentUri);
+        } catch {
+            return;
+        }
+
+        const subDirs: vscode.Uri[] = [];
+        for (const [name, type] of entries) {
+            if (token.isCancellationRequested) return;
+            const childUri = vscode.Uri.joinPath(currentUri, name);
+            if (type === vscode.FileType.Directory) {
+                subDirs.push(childUri);
+            } else if (type === vscode.FileType.File) {
+                // Normalize file path relative to root: e.g. /Tafnit/App/Portfolio/utils.cls -> Tafnit/App/Portfolio/utils.cls
+                const relativePath = childUri.path.startsWith('/') ? childUri.path.substring(1) : childUri.path;
+                
+                if (nameFilterRegex.test(name) || nameFilterRegex.test(relativePath)) {
+                    fileUris.push(childUri);
+                }
+            }
+        }
+
+        await runWithConcurrency(subDirs, DIR_CONCURRENCY, token, walk);
+    }
+
+    await walk(dirUri);
+    return fileUris;
+}
 
 async function runWithConcurrency<T>(
     items: T[],
     concurrency: number,
-    fn: (item: T) => Promise<void>,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    fn: (item: T) => Promise<void>
 ): Promise<void> {
     let index = 0;
     const workers = new Array(Math.min(concurrency, items.length)).fill(0).map(async () => {
@@ -249,49 +358,6 @@ async function runWithConcurrency<T>(
         }
     });
     await Promise.all(workers);
-}
-
-async function collectMatchingFiles(
-    dirUri: vscode.Uri,
-    nameFilterRegex: RegExp,
-    token: vscode.CancellationToken,
-    outputChannel: vscode.OutputChannel,
-    stats: { dirsListed: number; dirErrors: number; filesMatched: number }
-): Promise<vscode.Uri[]> {
-    const fileUris: vscode.Uri[] = [];
-
-    async function walk(currentUri: vscode.Uri) {
-        if (token.isCancellationRequested) return;
-
-        let entries: [string, vscode.FileType][];
-        try {
-            entries = await vscode.workspace.fs.readDirectory(currentUri);
-            stats.dirsListed++;
-        } catch (e) {
-            stats.dirErrors++;
-            outputChannel.appendLine(`Directory read failed for ${currentUri.path}: ${e}`);
-            return;
-        }
-
-        const subDirs: vscode.Uri[] = [];
-        for (const [name, type] of entries) {
-            const childUri = vscode.Uri.joinPath(currentUri, name);
-            if (type === vscode.FileType.Directory) {
-                subDirs.push(childUri);
-            } else if (type === vscode.FileType.File) {
-                const relativePath = childUri.path.startsWith('/') ? childUri.path.substring(1) : childUri.path;
-                if (nameFilterRegex.test(name) || nameFilterRegex.test(relativePath)) {
-                    fileUris.push(childUri);
-                    stats.filesMatched++;
-                }
-            }
-        }
-
-        await runWithConcurrency(subDirs, DIR_CONCURRENCY, walk, token);
-    }
-
-    await walk(dirUri);
-    return fileUris;
 }
 
 function convertLocationInputToRegex(input: string): RegExp {
@@ -307,27 +373,44 @@ function convertLocationInputToRegex(input: string): RegExp {
 }
 
 function convertSingleMaskToRegexStr(mask: string): string {
-    let result = mask;
+    let result = mask.trim();
 
-    if (result.includes('.') && !result.endsWith('.cls') && !result.endsWith('.mac') && !result.endsWith('.int')) {
-        const parts = result.split('.');
-        const lastPart = parts.pop() || '.*';
-        const packagePath = parts.join('/');
-        result = `${packagePath}/${lastPart}`;
+    // If it's a specific class name or package path containing dots (e.g., Tafnit.App.Portfolio.utils.cls)
+    const hasClassOrRoutineExt = /\.(cls|mac|int)$/i.test(result);
+
+    if (result.includes('.')) {
+        if (hasClassOrRoutineExt) {
+            // Transform class package dots to slashes while keeping extension intact
+            // e.g., Tafnit.App.Portfolio.utils.cls -> Tafnit/App/Portfolio/utils\.cls
+            const lastDotIndex = result.lastIndexOf('.');
+            const ext = result.substring(lastDotIndex); // .cls
+            const packageAndName = result.substring(0, lastDotIndex); // Tafnit.App.Portfolio.utils
+            
+            const slashPath = packageAndName.replace(/\./g, '/');
+            return `${slashPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*')}\\${ext}`;
+        } else {
+            // Wildcard package query like Tafnit.App.Portfolio.*
+            const parts = result.split('.');
+            const slashPath = parts.join('/');
+            let regexStr = slashPath
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                .replace(/\*/g, '.*')
+                .replace(/\?/g, '.');
+            
+            regexStr += '(\\.(cls|mac|int))?';
+            return regexStr;
+        }
     }
 
+    // Default wildcard mask handling (*.cls, WBLRSHOW*.int)
     let regexStr = result
         .replace(/[.+^${}()|[\]\\]/g, '\\$&')
         .replace(/\*/g, '.*')
         .replace(/\?/g, '.');
 
-    if (!mask.endsWith('.cls') && !mask.endsWith('.mac') && !mask.endsWith('.int')) {
+    if (!hasClassOrRoutineExt) {
         regexStr += '\\.(cls|mac|int)';
     }
 
     return regexStr;
-}
-
-function getFileNameFromUri(uri: vscode.Uri): string {
-    return uri.path.split('/').pop() || 'Unknown';
 }

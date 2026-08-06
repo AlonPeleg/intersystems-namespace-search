@@ -1,7 +1,7 @@
 {
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
-  "description": "Background concurrent ISFS full-text search with dedicated Activity Bar view.",
+  "description": "Background concurrent ISFS search with connection throttling to prevent server lockup.",
   "version": "1.0.0",
   "publisher": "your-publisher-name",
   "engines": {
@@ -25,7 +25,7 @@
       "activitybar": [
         {
           "id": "isfsNamespaceSearchContainer",
-          "title": "ISFS Namespace Search",
+          "title": "ISFS Search",
           "icon": "$(search)"
         }
       ]
@@ -33,34 +33,9 @@
     "views": {
       "isfsNamespaceSearchContainer": [
         {
+          "type": "webview",
           "id": "isfsNamespaceSearchView",
-          "name": "ISFS Results"
-        }
-      ]
-    },
-    "commands": [
-      {
-        "command": "intersystems-namespace-search.searchInNamespace",
-        "title": "New ISFS Search",
-        "icon": "$(search-search)"
-      },
-      {
-        "command": "intersystems-namespace-search.clearResults",
-        "title": "Clear Search Results",
-        "icon": "$(clear-all)"
-      }
-    ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "intersystems-namespace-search.searchInNamespace",
-          "when": "view == isfsNamespaceSearchView",
-          "group": "navigation"
-        },
-        {
-          "command": "intersystems-namespace-search.clearResults",
-          "when": "view == isfsNamespaceSearchView",
-          "group": "navigation"
+          "name": "Namespace Search"
         }
       ]
     }
