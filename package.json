@@ -1,7 +1,7 @@
 {
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
-  "description": "Client-side fast concurrent search across ISFS namespaces using VS Code FileSystem API.",
+  "description": "Background concurrent ISFS full-text search with dedicated Activity Bar view.",
   "version": "1.0.0",
   "publisher": "your-publisher-name",
   "engines": {
@@ -21,13 +21,49 @@
     "watch": "tsc -w -p ./"
   },
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "isfsNamespaceSearchContainer",
+          "title": "ISFS Namespace Search",
+          "icon": "$(search)"
+        }
+      ]
+    },
+    "views": {
+      "isfsNamespaceSearchContainer": [
+        {
+          "id": "isfsNamespaceSearchView",
+          "name": "ISFS Results"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "intersystems-namespace-search.searchInNamespace",
-        "title": "InterSystems: Search in Namespace...",
-        "category": "InterSystems"
+        "title": "New ISFS Search",
+        "icon": "$(search-search)"
+      },
+      {
+        "command": "intersystems-namespace-search.clearResults",
+        "title": "Clear Search Results",
+        "icon": "$(clear-all)"
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "intersystems-namespace-search.searchInNamespace",
+          "when": "view == isfsNamespaceSearchView",
+          "group": "navigation"
+        },
+        {
+          "command": "intersystems-namespace-search.clearResults",
+          "when": "view == isfsNamespaceSearchView",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "devDependencies": {
     "@types/node": "^18.x",

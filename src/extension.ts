@@ -1,20 +1,105 @@
 import * as vscode from 'vscode';
 
-interface SearchResultItem extends vscode.QuickPickItem {
-    uri: vscode.Uri;
+interface MatchResult {
+    fileName: string;
     line: number;
     column: number;
+    lineText: string;
+    uri: vscode.Uri;
 }
 
-// How many directories / files to process concurrently. isfs round-trips to the
-// server, so doing this one-at-a-time is what made the old version feel "stuck".
 const DIR_CONCURRENCY = 8;
 const FILE_CONCURRENCY = 12;
 
+class FileResultTreeItem extends vscode.TreeItem {
+    constructor(
+        public readonly fileName: string,
+        public readonly uri: vscode.Uri,
+        public readonly matches: MatchResult[]
+    ) {
+        super(fileName, vscode.TreeItemCollapsibleState.Expanded);
+        this.description = `${matches.length} match${matches.length > 1 ? 'es' : ''}`;
+        this.iconPath = vscode.ThemeIcon.File;
+        this.resourceUri = uri;
+    }
+}
+
+class MatchResultTreeItem extends vscode.TreeItem {
+    constructor(public readonly match: MatchResult) {
+        super(match.lineText.trim(), vscode.TreeItemCollapsibleState.None);
+        this.description = `line ${match.line + 1}`;
+        this.iconPath = new vscode.ThemeIcon('symbol-property');
+        
+        this.command = {
+            command: 'vscode.open',
+            title: 'Open Match',
+            arguments: [
+                match.uri,
+                {
+                    selection: new vscode.Range(match.line, match.column, match.line, match.column),
+                    preview: true
+                }
+            ]
+        };
+    }
+}
+
+class ISFSSearchTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<vscode.TreeItem | undefined | null | void>();
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+    private resultsMap: Map<string, MatchResult[]> = new Map();
+    private uriMap: Map<string, vscode.Uri> = new Map();
+
+    clear(): void {
+        this.resultsMap.clear();
+        this.uriMap.clear();
+        this._onDidChangeTreeData.fire();
+    }
+
+    addMatches(fileUri: vscode.Uri, matches: MatchResult[]): void {
+        if (matches.length === 0) return;
+        const key = fileUri.path;
+        this.resultsMap.set(key, matches);
+        this.uriMap.set(key, fileUri);
+        this._onDidChangeTreeData.fire();
+    }
+
+    getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
+        return element;
+    }
+
+    async getChildren(element?: vscode.TreeItem): Promise<vscode.TreeItem[]> {
+        if (!element) {
+            const items: FileResultTreeItem[] = [];
+            for (const [key, matches] of this.resultsMap.entries()) {
+                const uri = this.uriMap.get(key)!;
+                const fileName = key.split('/').pop() || key;
+                items.push(new FileResultTreeItem(fileName, uri, matches));
+            }
+            return items;
+        }
+
+        if (element instanceof FileResultTreeItem) {
+            return element.matches.map(m => new MatchResultTreeItem(m));
+        }
+
+        return [];
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel("InterSystems Namespace Search");
+    const treeProvider = new ISFSSearchTreeProvider();
+    
+    vscode.window.registerTreeDataProvider('isfsNamespaceSearchView', treeProvider);
 
-    let disposable = vscode.commands.registerCommand('intersystems-namespace-search.searchInNamespace', async () => {
+    const clearCommand = vscode.commands.registerCommand('intersystems-namespace-search.clearResults', () => {
+        treeProvider.clear();
+        outputChannel.appendLine("Search results cleared.");
+    });
+
+    const searchCommand = vscode.commands.registerCommand('intersystems-namespace-search.searchInNamespace', async () => {
         const isfsFolders = vscode.workspace.workspaceFolders?.filter(
             f => f.uri.scheme === 'isfs' || f.uri.scheme === 'isfs-readonly'
         );
@@ -51,6 +136,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         const nameFilterRegex = convertLocationInputToRegex(locationInput);
 
+        treeProvider.clear();
         outputChannel.clear();
         outputChannel.appendLine(`=== InterSystems Namespace Search ===`);
         outputChannel.appendLine(`Folder: ${selectedFolder.uri.toString()}`);
@@ -59,12 +145,16 @@ export function activate(context: vscode.ExtensionContext) {
         outputChannel.appendLine(`Resolved mask regex: ${nameFilterRegex}`);
         outputChannel.show(true);
 
-        await vscode.window.withProgress({
+        // Focus sidebar panel right away so user sees results appearing live
+        vscode.commands.executeCommand('isfsNamespaceSearchView.focus');
+
+        // Runs inside window.withProgress with location Notification to keep status visible without blocking UI
+        vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: `Searching "${searchQuery}" in ${selectedFolder.name}...`,
             cancellable: true
         }, async (progress, token) => {
-            const stats = { dirsListed: 0, dirErrors: 0, filesMatched: 0, filesRead: 0, readErrors: 0 };
+            const stats = { dirsListed: 0, dirErrors: 0, filesMatched: 0, filesRead: 0, readErrors: 0, totalMatches: 0 };
 
             try {
                 progress.report({ message: 'Listing files...' });
@@ -74,21 +164,19 @@ export function activate(context: vscode.ExtensionContext) {
                 outputChannel.appendLine(`Files matching mask: ${targetFiles.length}`);
 
                 if (targetFiles.length === 0) {
-                    outputChannel.appendLine(`\nNo files matched the mask "${locationInput}". This means either:`);
-                    outputChannel.appendLine(`  1. The mask doesn't match how your files are named/organized, or`);
-                    outputChannel.appendLine(`  2. Directory listing failed (see dirErrors above / errors logged during listing).`);
-                    vscode.window.showWarningMessage(`No files matched mask "${locationInput}". See output channel for details.`);
+                    outputChannel.appendLine(`\nNo files matched mask "${locationInput}".`);
+                    vscode.window.showWarningMessage(`No files matched mask "${locationInput}".`);
                     return;
                 }
 
                 const searchRegex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                const results: SearchResultItem[] = [];
-
                 let processedCount = 0;
+
                 await runWithConcurrency(targetFiles, FILE_CONCURRENCY, async (fileUri) => {
                     if (token.isCancellationRequested) return;
                     processedCount++;
                     stats.filesRead++;
+                    
                     progress.report({
                         message: `Scanning ${processedCount} of ${targetFiles.length} files`,
                         increment: (1 / targetFiles.length) * 100
@@ -98,23 +186,28 @@ export function activate(context: vscode.ExtensionContext) {
                         const fileBytes = await vscode.workspace.fs.readFile(fileUri);
                         const content = new TextDecoder('utf-8').decode(fileBytes);
                         const lines = content.split(/\r?\n/);
+                        const fileMatches: MatchResult[] = [];
 
                         lines.forEach((lineText, lineIdx) => {
                             const regexCopy = new RegExp(searchRegex.source, searchRegex.flags);
                             let match: RegExpExecArray | null;
                             while ((match = regexCopy.exec(lineText)) !== null) {
                                 const fileName = getFileNameFromUri(fileUri);
-                                results.push({
-                                    label: `${fileName}:${lineIdx + 1}`,
-                                    description: lineText.trim(),
-                                    detail: fileUri.path,
-                                    uri: fileUri,
+                                fileMatches.push({
+                                    fileName,
                                     line: lineIdx,
-                                    column: match.index
+                                    column: match.index,
+                                    lineText,
+                                    uri: fileUri
                                 });
+                                stats.totalMatches++;
                                 if (!regexCopy.global) break;
                             }
                         });
+
+                        if (fileMatches.length > 0) {
+                            treeProvider.addMatches(fileUri, fileMatches);
+                        }
                     } catch (readErr) {
                         stats.readErrors++;
                         outputChannel.appendLine(`Skip/Error reading ${fileUri.path}: ${readErr}`);
@@ -122,26 +215,12 @@ export function activate(context: vscode.ExtensionContext) {
                 }, token);
 
                 outputChannel.appendLine(`\nFiles read: ${stats.filesRead} (read errors: ${stats.readErrors})`);
-                outputChannel.appendLine(`Search complete. Found ${results.length} total matches.`);
+                outputChannel.appendLine(`Search complete. Found ${stats.totalMatches} total matches.`);
 
-                if (results.length === 0) {
+                if (stats.totalMatches === 0) {
                     vscode.window.showInformationMessage(
-                        `Scanned ${targetFiles.length} matching files but found no occurrences of "${searchQuery}". ` +
-                        `If you expected matches, check the output channel — ${stats.readErrors} file(s) failed to read.`
+                        `Scanned ${targetFiles.length} matching files but found no occurrences of "${searchQuery}".`
                     );
-                    return;
-                }
-
-                const selectedMatch = await vscode.window.showQuickPick(results, {
-                    placeHolder: `Found ${results.length} matches. Select item to jump:`
-                });
-
-                if (selectedMatch) {
-                    const doc = await vscode.workspace.openTextDocument(selectedMatch.uri);
-                    const editor = await vscode.window.showTextDocument(doc);
-                    const pos = new vscode.Position(selectedMatch.line, selectedMatch.column);
-                    editor.selection = new vscode.Selection(pos, pos);
-                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
                 }
             } catch (err) {
                 outputChannel.appendLine(`Execution error: ${err}`);
@@ -150,16 +229,11 @@ export function activate(context: vscode.ExtensionContext) {
         });
     });
 
-    context.subscriptions.push(disposable, outputChannel);
+    context.subscriptions.push(searchCommand, clearCommand, outputChannel);
 }
 
 export function deactivate() {}
 
-/**
- * Runs `fn` over `items` with at most `concurrency` in flight at once.
- * Plain per-item `await` in a for-loop is what made the previous version slow —
- * isfs round-trips to the server, so batching them in parallel matters a lot.
- */
 async function runWithConcurrency<T>(
     items: T[],
     concurrency: number,
@@ -177,10 +251,6 @@ async function runWithConcurrency<T>(
     await Promise.all(workers);
 }
 
-/**
- * Walks the ISFS tree in parallel batches, logging every directory-listing
- * error instead of silently swallowing it (the old version's biggest blind spot).
- */
 async function collectMatchingFiles(
     dirUri: vscode.Uri,
     nameFilterRegex: RegExp,
