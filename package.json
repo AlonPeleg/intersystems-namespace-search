@@ -1,0 +1,37 @@
+{
+  "name": "intersystems-namespace-search",
+  "displayName": "InterSystems Namespace Search",
+  "description": "Client-side fast concurrent search across ISFS namespaces using VS Code FileSystem API.",
+  "version": "1.0.0",
+  "publisher": "your-publisher-name",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onFileSystem:isfs",
+    "onFileSystem:isfs-readonly"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "intersystems-namespace-search.searchInNamespace",
+        "title": "InterSystems: Search in Namespace...",
+        "category": "InterSystems"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^18.x",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0"
+  }
+}
