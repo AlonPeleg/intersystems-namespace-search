@@ -94,7 +94,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         this._view.webview.postMessage({ type: 'searchStarted' });
 
         try {
-            const targetFiles = await collectMatchingFiles(folder.uri, nameFilterRegex, token);
+            this._view.webview.postMessage({ type: 'statusUpdate', message: 'Resolving target path...' });
+
+            const targetFiles = await resolveFilesFast(folder.uri, mask, nameFilterRegex, token);
 
             if (token.isCancellationRequested) {
                 this._view.webview.postMessage({ type: 'searchStopped', message: 'Search cancelled.' });
@@ -211,7 +213,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="input-group">
         <label>FILE MASK / PACKAGE</label>
-        <input type="text" id="mask" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio.utils.cls OR *.cls" />
+        <input type="text" id="mask" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio*.cls" />
     </div>
     <div class="btn-row">
         <button id="searchBtn">Search</button>
@@ -247,7 +249,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const msg = event.data;
             switch (msg.type) {
                 case 'searchStarted':
-                    statusDiv.textContent = 'Listing files...';
+                    statusDiv.textContent = 'Preparing search...';
                     searchBtn.style.display = 'none';
                     stopBtn.style.display = 'block';
                     break;
@@ -302,8 +304,54 @@ function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function resolveFilesFast(
+    rootFolderUri: vscode.Uri,
+    mask: string,
+    nameFilterRegex: RegExp,
+    token: vscode.CancellationToken
+): Promise<vscode.Uri[]> {
+    const cleanMask = mask.trim();
+
+    // 1. Direct hit check if exact single class file (e.g., Tafnit.App.Portfolio.utils.cls)
+    if (!cleanMask.includes('*') && !cleanMask.includes('?') && !cleanMask.includes(',') && cleanMask.endsWith('.cls')) {
+        const filePath = cleanMask.replace(/\./g, '/').replace(/\/cls$/, '.cls');
+        const directFileUri = vscode.Uri.joinPath(rootFolderUri, filePath);
+        try {
+            const stat = await vscode.workspace.fs.stat(directFileUri);
+            if (stat.type === vscode.FileType.File) {
+                return [directFileUri];
+            }
+        } catch {
+            // Fall back to target dir walk if stat fails
+        }
+    }
+
+    // 2. Extract parent directory path from dotted mask (e.g. Tafnit.App.Portfolio*.cls -> Tafnit/App)
+    let directTargetFolder: string | null = null;
+    if (cleanMask.includes('.')) {
+        const firstMask = cleanMask.split(',')[0].trim();
+        const lastDotIndex = firstMask.lastIndexOf('.');
+        if (lastDotIndex > 0) {
+            const packagePath = firstMask.substring(0, lastDotIndex); // Tafnit.App.Portfolio
+            const parts = packagePath.split('.');
+            const staticParts: string[] = [];
+            for (const part of parts) {
+                if (part.includes('*') || part.includes('?')) break;
+                staticParts.push(part);
+            }
+            if (staticParts.length > 0) {
+                directTargetFolder = staticParts.join('/');
+            }
+        }
+    }
+
+    const startUri = directTargetFolder ? vscode.Uri.joinPath(rootFolderUri, directTargetFolder) : rootFolderUri;
+    return await collectMatchingFiles(startUri, rootFolderUri, nameFilterRegex, token);
+}
+
 async function collectMatchingFiles(
-    dirUri: vscode.Uri,
+    startUri: vscode.Uri,
+    rootFolderUri: vscode.Uri,
     nameFilterRegex: RegExp,
     token: vscode.CancellationToken
 ): Promise<vscode.Uri[]> {
@@ -327,9 +375,9 @@ async function collectMatchingFiles(
             if (type === vscode.FileType.Directory) {
                 subDirs.push(childUri);
             } else if (type === vscode.FileType.File) {
-                // Normalize file path relative to root: e.g. /Tafnit/App/Portfolio/utils.cls -> Tafnit/App/Portfolio/utils.cls
-                const relativePath = childUri.path.startsWith('/') ? childUri.path.substring(1) : childUri.path;
-                
+                let relativePath = childUri.path.substring(rootFolderUri.path.length);
+                if (relativePath.startsWith('/')) relativePath = relativePath.substring(1);
+
                 if (nameFilterRegex.test(name) || nameFilterRegex.test(relativePath)) {
                     fileUris.push(childUri);
                 }
@@ -339,7 +387,7 @@ async function collectMatchingFiles(
         await runWithConcurrency(subDirs, DIR_CONCURRENCY, token, walk);
     }
 
-    await walk(dirUri);
+    await walk(startUri);
     return fileUris;
 }
 
@@ -374,22 +422,17 @@ function convertLocationInputToRegex(input: string): RegExp {
 
 function convertSingleMaskToRegexStr(mask: string): string {
     let result = mask.trim();
-
-    // If it's a specific class name or package path containing dots (e.g., Tafnit.App.Portfolio.utils.cls)
     const hasClassOrRoutineExt = /\.(cls|mac|int)$/i.test(result);
 
     if (result.includes('.')) {
         if (hasClassOrRoutineExt) {
-            // Transform class package dots to slashes while keeping extension intact
-            // e.g., Tafnit.App.Portfolio.utils.cls -> Tafnit/App/Portfolio/utils\.cls
             const lastDotIndex = result.lastIndexOf('.');
-            const ext = result.substring(lastDotIndex); // .cls
-            const packageAndName = result.substring(0, lastDotIndex); // Tafnit.App.Portfolio.utils
+            const ext = result.substring(lastDotIndex);
+            const packageAndName = result.substring(0, lastDotIndex);
             
             const slashPath = packageAndName.replace(/\./g, '/');
-            return `${slashPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*')}\\${ext}`;
+            return `.*${slashPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*')}\\${ext}`;
         } else {
-            // Wildcard package query like Tafnit.App.Portfolio.*
             const parts = result.split('.');
             const slashPath = parts.join('/');
             let regexStr = slashPath
@@ -398,11 +441,10 @@ function convertSingleMaskToRegexStr(mask: string): string {
                 .replace(/\?/g, '.');
             
             regexStr += '(\\.(cls|mac|int))?';
-            return regexStr;
+            return `.*${regexStr}`;
         }
     }
 
-    // Default wildcard mask handling (*.cls, WBLRSHOW*.int)
     let regexStr = result
         .replace(/[.+^${}()|[\]\\]/g, '\\$&')
         .replace(/\*/g, '.*')
@@ -412,5 +454,5 @@ function convertSingleMaskToRegexStr(mask: string): string {
         regexStr += '\\.(cls|mac|int)';
     }
 
-    return regexStr;
+    return `.*${regexStr}`;
 }

@@ -1,7 +1,7 @@
 {
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
-  "description": "Background concurrent ISFS search with connection throttling to prevent server lockup.",
+  "description": "Background concurrent ISFS search with optimized direct path target resolution.",
   "version": "1.0.0",
   "publisher": "your-publisher-name",
   "engines": {
