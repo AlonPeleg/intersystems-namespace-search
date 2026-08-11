@@ -35,7 +35,8 @@
         {
           "type": "webview",
           "id": "isfsNamespaceSearchView",
-          "name": "Namespace Search"
+          "name": "Namespace Search",
+          "icon": "$(search)"
         }
       ]
     }
