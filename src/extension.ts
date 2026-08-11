@@ -95,7 +95,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const nameFilterRegex = convertLocationInputToRegex(mask);
         const searchRegex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
 
-        this._view.webview.postMessage({ type: 'searchStarted' });
+        this._view.webview.postMessage({ type: 'searchStarted', query, mask });
 
         try {
             this._view.webview.postMessage({ type: 'statusUpdate', message: 'Resolving target path...' });
@@ -166,7 +166,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             } else {
                 this._view.webview.postMessage({
                     type: 'searchCompleted',
-                    message: `Complete. Found ${totalMatches} match(es) across ${targetFiles.length} files.`
+                    message: `Complete. Found ${totalMatches} match(es) across ${targetFiles.length} files.`,
+                    totalMatches
                 });
             }
 
@@ -202,6 +203,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         button#clearBtn { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
         button#clearBtn:hover { background: var(--vscode-button-secondaryHoverBackground); }
         #status { font-size: 11px; margin: 10px 0; color: var(--vscode-descriptionForeground); font-style: italic; }
+        
+        .section-header {
+            font-size: 11px; font-weight: bold; text-transform: uppercase; margin: 15px 0 6px 0;
+            letter-spacing: 0.5px; opacity: 0.7; border-bottom: 1px solid var(--vscode-widget-border, #333);
+            padding-bottom: 3px; display: flex; justify-content: space-between; align-items: center;
+        }
+
         .file-group { margin-bottom: 10px; }
         .file-header { font-weight: bold; font-size: 12px; color: var(--vscode-symbolIcon-fileForeground, #3794ff); margin-bottom: 2px; word-break: break-all; }
         .match-item {
@@ -210,6 +218,30 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
         .match-item:hover { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
         .line-num { color: var(--vscode-descriptionForeground); font-size: 10px; margin-right: 5px; }
+
+        /* History Tab Details/Summary Styling */
+        details.history-tab {
+            background: var(--vscode-sideBarSectionHeader-background, rgba(255,255,255,0.03));
+            border: 1px solid var(--vscode-widget-border, #333);
+            border-radius: 3px;
+            margin-bottom: 6px;
+            overflow: hidden;
+        }
+        details.history-tab > summary {
+            padding: 6px 8px; font-size: 11px; font-weight: bold; cursor: pointer;
+            display: flex; align-items: center; justify-content: space-between;
+            user-select: none;
+        }
+        details.history-tab > summary:hover { background: var(--vscode-list-hoverBackground); }
+        .history-title { font-weight: bold; color: var(--vscode-foreground); word-break: break-all; flex: 1; padding-right: 6px; }
+        .history-time { font-weight: normal; opacity: 0.6; font-size: 10px; margin-right: 6px; white-space: nowrap; }
+        .history-content { padding: 8px; border-top: 1px solid var(--vscode-widget-border, #333); }
+        .tab-clear-btn {
+            background: none; border: none; color: var(--vscode-descriptionForeground);
+            cursor: pointer; padding: 2px 4px; font-size: 12px; border-radius: 2px;
+            flex: 0; line-height: 1;
+        }
+        .tab-clear-btn:hover { color: var(--vscode-errorForeground, #f48771); background: var(--vscode-list-hoverBackground); }
     </style>
 </head>
 <body>
@@ -223,12 +255,17 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="btn-row">
         <button id="searchBtn">Search</button>
-        <button id="clearBtn">Clear</button>
+        <button id="clearBtn">Clear All</button>
         <button id="stopBtn">Stop</button>
     </div>
 
     <div id="status">Ready</div>
+
+    <div class="section-header">Current Search</div>
     <div id="results"></div>
+
+    <div class="section-header">Search History</div>
+    <div id="historyContainer"></div>
 
     <script>
         const vscode = acquireVsCodeApi();
@@ -239,6 +276,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const stopBtn = document.getElementById('stopBtn');
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
+        const historyContainer = document.getElementById('historyContainer');
+
+        let activeSearchInfo = { query: '', mask: '', totalMatches: 0 };
 
         // Restore state on panel reload
         const previousState = vscode.getState();
@@ -246,10 +286,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             if (previousState.query !== undefined) queryInput.value = previousState.query;
             if (previousState.mask !== undefined) maskInput.value = previousState.mask;
             if (previousState.resultsHtml !== undefined) resultsDiv.innerHTML = previousState.resultsHtml;
+            if (previousState.historyHtml !== undefined) historyContainer.innerHTML = previousState.historyHtml;
             if (previousState.statusText !== undefined) statusDiv.textContent = previousState.statusText;
+            if (previousState.activeSearchInfo) activeSearchInfo = previousState.activeSearchInfo;
             
-            // Re-attach listeners to restored HTML elements
-            attachMatchClickListeners();
+            attachListeners();
         }
 
         function saveState() {
@@ -257,7 +298,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 query: queryInput.value,
                 mask: maskInput.value,
                 resultsHtml: resultsDiv.innerHTML,
-                statusText: statusDiv.textContent
+                historyHtml: historyContainer.innerHTML,
+                statusText: statusDiv.textContent,
+                activeSearchInfo
             });
         }
 
@@ -269,13 +312,19 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const mask = maskInput.value.trim();
             if (!query) return;
 
+            // Archive current results into history before starting a new search
+            archiveCurrentSearchToHistory();
+
             resultsDiv.innerHTML = '';
+            activeSearchInfo = { query, mask, totalMatches: 0 };
             saveState();
+
             vscode.postMessage({ type: 'startSearch', query, mask });
         });
 
         clearBtn.addEventListener('click', () => {
             resultsDiv.innerHTML = '';
+            historyContainer.innerHTML = '';
             statusDiv.textContent = 'Ready';
             saveState();
         });
@@ -299,10 +348,17 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     saveState();
                     break;
                 case 'addMatches':
-                    renderFileMatches(msg.fileName, msg.uri, msg.matches);
+                    renderFileMatches(resultsDiv, msg.fileName, msg.uri, msg.matches);
                     saveState();
                     break;
                 case 'searchCompleted':
+                    activeSearchInfo.totalMatches = msg.totalMatches || 0;
+                    statusDiv.textContent = msg.message || 'Complete.';
+                    searchBtn.style.display = 'block';
+                    clearBtn.style.display = 'block';
+                    stopBtn.style.display = 'none';
+                    saveState();
+                    break;
                 case 'searchStopped':
                 case 'error':
                     statusDiv.textContent = msg.message || 'Stopped';
@@ -314,7 +370,55 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             }
         });
 
-        function renderFileMatches(fileName, uri, matches) {
+        function archiveCurrentSearchToHistory() {
+            const currentMatches = resultsDiv.querySelectorAll('.match-item').length;
+            if (currentMatches === 0) return;
+
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const dateStr = now.toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+            const details = document.createElement('details');
+            details.className = 'history-tab';
+
+            const summary = document.createElement('summary');
+            
+            const titleSpan = document.createElement('span');
+            titleSpan.className = 'history-title';
+            titleSpan.textContent = '"' + (activeSearchInfo.query || queryInput.value) + '" (' + currentMatches + ' matches)';
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'history-time';
+            timeSpan.textContent = dateStr + ' ' + timeStr;
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'tab-clear-btn';
+            deleteBtn.title = 'Clear this entry';
+            deleteBtn.textContent = '✕';
+            deleteBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                details.remove();
+                saveState();
+            });
+
+            summary.appendChild(titleSpan);
+            summary.appendChild(timeSpan);
+            summary.appendChild(deleteBtn);
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'history-content';
+            contentDiv.innerHTML = resultsDiv.innerHTML;
+
+            details.appendChild(summary);
+            details.appendChild(contentDiv);
+
+            // Prepend new search history at top
+            historyContainer.insertBefore(details, historyContainer.firstChild);
+            attachListeners();
+        }
+
+        function renderFileMatches(container, fileName, uri, matches) {
             const group = document.createElement('div');
             group.className = 'file-group';
 
@@ -337,18 +441,32 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 group.appendChild(item);
             });
 
-            resultsDiv.appendChild(group);
+            container.appendChild(group);
         }
 
-        function attachMatchClickListeners() {
-            const items = resultsDiv.querySelectorAll('.match-item');
+        function attachListeners() {
+            // Re-bind file click events for current and historical result items
+            const items = document.querySelectorAll('.match-item');
             items.forEach(item => {
+                item.onclick = null;
                 item.addEventListener('click', () => {
                     const uri = item.getAttribute('data-uri');
                     const line = parseInt(item.getAttribute('data-line'), 10);
                     const column = parseInt(item.getAttribute('data-column'), 10);
                     vscode.postMessage({ type: 'openMatch', uri, line, column });
                 });
+            });
+
+            // Re-bind individual history tab clear buttons
+            const tabClearBtns = document.querySelectorAll('.tab-clear-btn');
+            tabClearBtns.forEach(btn => {
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    const tab = btn.closest('.history-tab');
+                    if (tab) tab.remove();
+                    saveState();
+                };
             });
         }
 
