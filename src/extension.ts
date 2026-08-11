@@ -186,18 +186,33 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         body { font-family: var(--vscode-font-family); padding: 10px; color: var(--vscode-foreground); background-color: var(--vscode-sideBar-background); }
         .input-group { margin-bottom: 8px; }
         label { display: block; font-size: 11px; margin-bottom: 3px; font-weight: bold; opacity: 0.8; }
+        
+        .mask-row {
+            display: flex; gap: 4px; margin-bottom: 4px; align-items: center;
+        }
+
         input[type="text"] {
             width: 100%; box-sizing: border-box; background: var(--vscode-input-background);
             color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border);
-            padding: 5px; font-size: 12px; border-radius: 2px; outline: none;
+            padding: 5px; font-size: 12px; border-radius: 2px; outline: none; flex: 1;
         }
         input[type="text"]:focus { border-color: var(--vscode-focusBorder); }
+        
+        .icon-btn {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border: none; padding: 4px 8px; font-size: 12px; cursor: pointer;
+            border-radius: 2px; font-weight: bold; height: 26px; line-height: 1;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .icon-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+
         .btn-row { display: flex; gap: 5px; margin-top: 6px; }
-        button {
+        button.action-btn {
             flex: 1; background: var(--vscode-button-background); color: var(--vscode-button-foreground);
             border: none; padding: 6px; font-size: 12px; cursor: pointer; border-radius: 2px; font-weight: bold;
         }
-        button:hover { background: var(--vscode-button-hoverBackground); }
+        button.action-btn:hover { background: var(--vscode-button-hoverBackground); }
         button#stopBtn { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); display: none; }
         button#stopBtn:hover { background: var(--vscode-button-secondaryHoverBackground); }
         button#clearBtn { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
@@ -210,8 +225,22 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             padding-bottom: 3px; display: flex; justify-content: space-between; align-items: center;
         }
 
-        .file-group { margin-bottom: 10px; }
-        .file-header { font-weight: bold; font-size: 12px; color: var(--vscode-symbolIcon-fileForeground, #3794ff); margin-bottom: 2px; word-break: break-all; }
+        /* Collapsible File Details */
+        details.file-group { margin-bottom: 8px; }
+        details.file-group > summary.file-header {
+            font-weight: bold; font-size: 12px;
+            color: var(--vscode-symbolIcon-fileForeground, #3794ff);
+            margin-bottom: 4px; word-break: break-all; cursor: pointer;
+            user-select: none; list-style: none; display: flex; align-items: center;
+        }
+        details.file-group > summary.file-header::-webkit-details-marker { display: none; }
+        details.file-group > summary.file-header::before {
+            content: '▾'; display: inline-block; margin-right: 5px; font-size: 11px;
+            transition: transform 0.1s ease;
+        }
+        details.file-group[open] > summary.file-header::before { transform: rotate(0deg); }
+        details.file-group:not([open]) > summary.file-header::before { transform: rotate(-90deg); }
+
         .match-item {
             font-size: 11px; padding: 3px 6px; cursor: pointer; background: var(--vscode-list-hoverBackground);
             margin-bottom: 2px; border-radius: 2px; font-family: var(--vscode-editor-font-family); word-break: break-all;
@@ -219,7 +248,6 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         .match-item:hover { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
         .line-num { color: var(--vscode-descriptionForeground); font-size: 10px; margin-right: 5px; }
 
-        /* History Tab Details/Summary Styling */
         details.history-tab {
             background: var(--vscode-sideBarSectionHeader-background, rgba(255,255,255,0.03));
             border: 1px solid var(--vscode-widget-border, #333);
@@ -251,12 +279,17 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="input-group">
         <label>FILE MASK / PACKAGE</label>
-        <input type="text" id="mask" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio*.cls" />
+        <div id="masksContainer">
+            <div class="mask-row">
+                <input type="text" class="mask-input" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio*.cls" />
+                <button type="button" class="icon-btn" id="addMaskBtn" title="Add another mask/package">+</button>
+            </div>
+        </div>
     </div>
     <div class="btn-row">
-        <button id="searchBtn">Search</button>
-        <button id="clearBtn">Clear All</button>
-        <button id="stopBtn">Stop</button>
+        <button id="searchBtn" class="action-btn">Search</button>
+        <button id="clearBtn" class="action-btn">Clear All</button>
+        <button id="stopBtn" class="action-btn">Stop</button>
     </div>
 
     <div id="status">Ready</div>
@@ -270,7 +303,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     <script>
         const vscode = acquireVsCodeApi();
         const queryInput = document.getElementById('query');
-        const maskInput = document.getElementById('mask');
+        const masksContainer = document.getElementById('masksContainer');
+        const addMaskBtn = document.getElementById('addMaskBtn');
         const searchBtn = document.getElementById('searchBtn');
         const clearBtn = document.getElementById('clearBtn');
         const stopBtn = document.getElementById('stopBtn');
@@ -284,7 +318,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const previousState = vscode.getState();
         if (previousState) {
             if (previousState.query !== undefined) queryInput.value = previousState.query;
-            if (previousState.mask !== undefined) maskInput.value = previousState.mask;
+            if (previousState.masks && Array.isArray(previousState.masks)) {
+                restoreMaskInputs(previousState.masks);
+            }
             if (previousState.resultsHtml !== undefined) resultsDiv.innerHTML = previousState.resultsHtml;
             if (previousState.historyHtml !== undefined) historyContainer.innerHTML = previousState.historyHtml;
             if (previousState.statusText !== undefined) statusDiv.textContent = previousState.statusText;
@@ -293,10 +329,20 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             attachListeners();
         }
 
+        function getMaskValues() {
+            const inputs = document.querySelectorAll('.mask-input');
+            const values = [];
+            inputs.forEach(input => {
+                const val = input.value.trim();
+                if (val) values.push(val);
+            });
+            return values;
+        }
+
         function saveState() {
             vscode.setState({
                 query: queryInput.value,
-                mask: maskInput.value,
+                masks: getMaskValues(),
                 resultsHtml: resultsDiv.innerHTML,
                 historyHtml: historyContainer.innerHTML,
                 statusText: statusDiv.textContent,
@@ -304,22 +350,75 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             });
         }
 
+        function restoreMaskInputs(masks) {
+            masksContainer.innerHTML = '';
+            if (!masks || masks.length === 0) masks = ['*.cls,*.mac,*.int'];
+
+            masks.forEach((maskValue, index) => {
+                addMaskRow(maskValue, index === 0);
+            });
+        }
+
+        function addMaskRow(value = '', isFirst = false) {
+            const row = document.createElement('div');
+            row.className = 'mask-row';
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'mask-input';
+            input.value = value;
+            input.placeholder = 'e.g. Tafnit.App.Portfolio*.cls';
+            input.addEventListener('input', saveState);
+
+            row.appendChild(input);
+
+            if (isFirst) {
+                const addBtn = document.createElement('button');
+                addBtn.type = 'button';
+                addBtn.className = 'icon-btn';
+                addBtn.textContent = '+';
+                addBtn.title = 'Add another mask/package';
+                addBtn.addEventListener('click', () => {
+                    addMaskRow('', false);
+                    saveState();
+                });
+                row.appendChild(addBtn);
+            } else {
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'icon-btn';
+                removeBtn.textContent = '-';
+                removeBtn.title = 'Remove this mask';
+                removeBtn.addEventListener('click', () => {
+                    row.remove();
+                    saveState();
+                });
+                row.appendChild(removeBtn);
+            }
+
+            masksContainer.appendChild(row);
+        }
+
         queryInput.addEventListener('input', saveState);
-        maskInput.addEventListener('input', saveState);
+        addMaskBtn.addEventListener('click', () => {
+            addMaskRow('', false);
+            saveState();
+        });
 
         searchBtn.addEventListener('click', () => {
             const query = queryInput.value.trim();
-            const mask = maskInput.value.trim();
+            const maskList = getMaskValues();
+            const combinedMask = maskList.join(',');
+
             if (!query) return;
 
-            // Archive current results into history before starting a new search
             archiveCurrentSearchToHistory();
 
             resultsDiv.innerHTML = '';
-            activeSearchInfo = { query, mask, totalMatches: 0 };
+            activeSearchInfo = { query, mask: combinedMask, totalMatches: 0 };
             saveState();
 
-            vscode.postMessage({ type: 'startSearch', query, mask });
+            vscode.postMessage({ type: 'startSearch', query, mask: combinedMask });
         });
 
         clearBtn.addEventListener('click', () => {
@@ -413,19 +512,19 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             details.appendChild(summary);
             details.appendChild(contentDiv);
 
-            // Prepend new search history at top
             historyContainer.insertBefore(details, historyContainer.firstChild);
             attachListeners();
         }
 
         function renderFileMatches(container, fileName, uri, matches) {
-            const group = document.createElement('div');
-            group.className = 'file-group';
+            const details = document.createElement('details');
+            details.className = 'file-group';
+            details.open = true;
 
-            const header = document.createElement('div');
-            header.className = 'file-header';
-            header.textContent = '📄 ' + fileName + ' (' + matches.length + ')';
-            group.appendChild(header);
+            const summary = document.createElement('summary');
+            summary.className = 'file-header';
+            summary.textContent = '📄 ' + fileName + ' (' + matches.length + ')';
+            details.appendChild(summary);
 
             matches.forEach(m => {
                 const item = document.createElement('div');
@@ -438,14 +537,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 item.addEventListener('click', () => {
                     vscode.postMessage({ type: 'openMatch', uri: m.uri, line: m.line, column: m.column });
                 });
-                group.appendChild(item);
+                details.appendChild(item);
             });
 
-            container.appendChild(group);
+            container.appendChild(details);
         }
 
         function attachListeners() {
-            // Re-bind file click events for current and historical result items
             const items = document.querySelectorAll('.match-item');
             items.forEach(item => {
                 item.onclick = null;
@@ -457,7 +555,6 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 });
             });
 
-            // Re-bind individual history tab clear buttons
             const tabClearBtns = document.querySelectorAll('.tab-clear-btn');
             tabClearBtns.forEach(btn => {
                 btn.onclick = (e) => {
@@ -490,9 +587,10 @@ async function resolveFilesFast(
     token: vscode.CancellationToken
 ): Promise<vscode.Uri[]> {
     const cleanMask = mask.trim();
+    const maskParts = cleanMask.split(',').map(m => m.trim()).filter(Boolean);
 
-    // 1. Direct hit check if exact single class file (e.g., Tafnit.App.Portfolio.utils.cls)
-    if (!cleanMask.includes('*') && !cleanMask.includes('?') && !cleanMask.includes(',') && cleanMask.endsWith('.cls')) {
+    // 1. Direct hit check if exact single class file (e.g. Tafnit.App.Portfolio.utils.cls)
+    if (maskParts.length === 1 && !cleanMask.includes('*') && !cleanMask.includes('?') && cleanMask.endsWith('.cls')) {
         const filePath = cleanMask.replace(/\./g, '/').replace(/\/cls$/, '.cls');
         const directFileUri = vscode.Uri.joinPath(rootFolderUri, filePath);
         try {
@@ -505,27 +603,53 @@ async function resolveFilesFast(
         }
     }
 
-    // 2. Extract parent directory path from dotted mask (e.g. Tafnit.App.Portfolio*.cls -> Tafnit/App)
-    let directTargetFolder: string | null = null;
-    if (cleanMask.includes('.')) {
-        const firstMask = cleanMask.split(',')[0].trim();
-        const lastDotIndex = firstMask.lastIndexOf('.');
-        if (lastDotIndex > 0) {
-            const packagePath = firstMask.substring(0, lastDotIndex); // Tafnit.App.Portfolio
-            const parts = packagePath.split('.');
-            const staticParts: string[] = [];
-            for (const part of parts) {
-                if (part.includes('*') || part.includes('?')) break;
-                staticParts.push(part);
-            }
-            if (staticParts.length > 0) {
-                directTargetFolder = staticParts.join('/');
+    // 2. Extract parent directory paths for ALL provided mask inputs
+    const targetFolders: string[] = [];
+    for (const singleMask of maskParts) {
+        if (singleMask.includes('.')) {
+            const lastDotIndex = singleMask.lastIndexOf('.');
+            if (lastDotIndex > 0) {
+                const packagePath = singleMask.substring(0, lastDotIndex);
+                const parts = packagePath.split('.');
+                const staticParts: string[] = [];
+                for (const part of parts) {
+                    if (part.includes('*') || part.includes('?')) break;
+                    staticParts.push(part);
+                }
+                if (staticParts.length > 0) {
+                    targetFolders.push(staticParts.join('/'));
+                }
             }
         }
     }
 
-    const startUri = directTargetFolder ? vscode.Uri.joinPath(rootFolderUri, directTargetFolder) : rootFolderUri;
-    return await collectMatchingFiles(startUri, rootFolderUri, nameFilterRegex, token);
+    // Find common root folder path among all target directories (if any exist)
+    let commonStartUri = rootFolderUri;
+    if (targetFolders.length > 0) {
+        const commonPath = findCommonPathPrefix(targetFolders);
+        if (commonPath) {
+            commonStartUri = vscode.Uri.joinPath(rootFolderUri, commonPath);
+        }
+    }
+
+    return await collectMatchingFiles(commonStartUri, rootFolderUri, nameFilterRegex, token);
+}
+
+function findCommonPathPrefix(paths: string[]): string {
+    if (!paths.length) return '';
+    const splitPaths = paths.map(p => p.split('/'));
+    let commonParts: string[] = [];
+    const first = splitPaths[0];
+
+    for (let i = 0; i < first.length; i++) {
+        const part = first[i];
+        if (splitPaths.every(p => p[i] === part)) {
+            commonParts.push(part);
+        } else {
+            break;
+        }
+    }
+    return commonParts.join('/');
 }
 
 async function collectMatchingFiles(
@@ -592,7 +716,7 @@ function convertLocationInputToRegex(input: string): RegExp {
     if (!clean) return /\.(cls|mac|int)$/i;
 
     if (clean.includes(',')) {
-        const parts = clean.split(',').map(p => convertSingleMaskToRegexStr(p.trim()));
+        const parts = clean.split(',').map(p => convertSingleMaskToRegexStr(p.trim())).filter(Boolean);
         return new RegExp(`^(${parts.join('|')})$`, 'i');
     }
 
@@ -601,6 +725,7 @@ function convertLocationInputToRegex(input: string): RegExp {
 
 function convertSingleMaskToRegexStr(mask: string): string {
     let result = mask.trim();
+    if (!result) return '';
     const hasClassOrRoutineExt = /\.(cls|mac|int)$/i.test(result);
 
     if (result.includes('.')) {

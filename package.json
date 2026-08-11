@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Background concurrent ISFS search with optimized direct path target resolution.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "your-publisher-name",
   "engines": {
     "vscode": "^1.80.0"
