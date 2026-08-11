@@ -51,7 +51,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 case 'startSearch': {
                     this.cancelCurrentSearch();
                     this._cancellationTokenSource = new vscode.CancellationTokenSource();
-                    this.executeThrottledSearch(data.query, data.mask, this._cancellationTokenSource.token);
+                    this.executeThrottledSearch(data.query, data.masks, this._cancellationTokenSource.token);
                     break;
                 }
                 case 'stopSearch': {
@@ -79,7 +79,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private async executeThrottledSearch(query: string, mask: string, token: vscode.CancellationToken) {
+    private async executeThrottledSearch(query: string, masks: string[], token: vscode.CancellationToken) {
         if (!this._view) return;
 
         const isfsFolders = vscode.workspace.workspaceFolders?.filter(
@@ -92,18 +92,38 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
 
         const folder = isfsFolders[0];
-        const nameFilterRegex = convertLocationInputToRegex(mask);
         const searchRegex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
 
-        this._view.webview.postMessage({ type: 'searchStarted', query, mask });
+        this._view.webview.postMessage({ type: 'searchStarted', query, mask: masks.join(',') });
 
         try {
-            this._view.webview.postMessage({ type: 'statusUpdate', message: 'Resolving target path...' });
+            this._view.webview.postMessage({ type: 'statusUpdate', message: 'Resolving target paths in parallel...' });
 
-            const targetFiles = await resolveFilesFast(folder.uri, mask, nameFilterRegex, token);
+            // Run independent resolution for each input mask concurrently
+            const resolutionPromises = masks.map(m => resolveSingleMaskFast(folder.uri, m, token));
+            const nestedResults = await Promise.all(resolutionPromises);
 
             if (token.isCancellationRequested) {
                 this._view.webview.postMessage({ type: 'searchStopped', message: 'Search cancelled.' });
+                return;
+            }
+
+            // Deduplicate files found across different mask inputs
+            const uniqueFileMap = new Map<string, vscode.Uri>();
+            for (const fileList of nestedResults) {
+                for (const uri of fileList) {
+                    uniqueFileMap.set(uri.toString(), uri);
+                }
+            }
+
+            const targetFiles = Array.from(uniqueFileMap.values());
+
+            if (targetFiles.length === 0) {
+                this._view.webview.postMessage({
+                    type: 'searchCompleted',
+                    message: 'Complete. No matching files found.',
+                    totalMatches: 0
+                });
                 return;
             }
 
@@ -408,17 +428,16 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         searchBtn.addEventListener('click', () => {
             const query = queryInput.value.trim();
             const maskList = getMaskValues();
-            const combinedMask = maskList.join(',');
 
             if (!query) return;
 
             archiveCurrentSearchToHistory();
 
             resultsDiv.innerHTML = '';
-            activeSearchInfo = { query, mask: combinedMask, totalMatches: 0 };
+            activeSearchInfo = { query, mask: maskList.join(','), totalMatches: 0 };
             saveState();
 
-            vscode.postMessage({ type: 'startSearch', query, mask: combinedMask });
+            vscode.postMessage({ type: 'startSearch', query, masks: maskList });
         });
 
         clearBtn.addEventListener('click', () => {
@@ -519,7 +538,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         function renderFileMatches(container, fileName, uri, matches) {
             const details = document.createElement('details');
             details.className = 'file-group';
-            details.open = true;
+            // Collapsed by default (details.open is false)
 
             const summary = document.createElement('summary');
             summary.className = 'file-header';
@@ -580,17 +599,18 @@ function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function resolveFilesFast(
+async function resolveSingleMaskFast(
     rootFolderUri: vscode.Uri,
-    mask: string,
-    nameFilterRegex: RegExp,
+    singleMask: string,
     token: vscode.CancellationToken
 ): Promise<vscode.Uri[]> {
-    const cleanMask = mask.trim();
-    const maskParts = cleanMask.split(',').map(m => m.trim()).filter(Boolean);
+    const cleanMask = singleMask.trim();
+    if (!cleanMask) return [];
 
-    // 1. Direct hit check if exact single class file (e.g. Tafnit.App.Portfolio.utils.cls)
-    if (maskParts.length === 1 && !cleanMask.includes('*') && !cleanMask.includes('?') && cleanMask.endsWith('.cls')) {
+    const nameFilterRegex = convertLocationInputToRegex(cleanMask);
+
+    // Direct hit check for single explicit class file
+    if (!cleanMask.includes('*') && !cleanMask.includes('?') && cleanMask.endsWith('.cls')) {
         const filePath = cleanMask.replace(/\./g, '/').replace(/\/cls$/, '.cls');
         const directFileUri = vscode.Uri.joinPath(rootFolderUri, filePath);
         try {
@@ -603,53 +623,26 @@ async function resolveFilesFast(
         }
     }
 
-    // 2. Extract parent directory paths for ALL provided mask inputs
-    const targetFolders: string[] = [];
-    for (const singleMask of maskParts) {
-        if (singleMask.includes('.')) {
-            const lastDotIndex = singleMask.lastIndexOf('.');
-            if (lastDotIndex > 0) {
-                const packagePath = singleMask.substring(0, lastDotIndex);
-                const parts = packagePath.split('.');
-                const staticParts: string[] = [];
-                for (const part of parts) {
-                    if (part.includes('*') || part.includes('?')) break;
-                    staticParts.push(part);
-                }
-                if (staticParts.length > 0) {
-                    targetFolders.push(staticParts.join('/'));
-                }
+    // Extract exact parent path for this specific mask
+    let targetFolder: string | null = null;
+    if (cleanMask.includes('.')) {
+        const lastDotIndex = cleanMask.lastIndexOf('.');
+        if (lastDotIndex > 0) {
+            const packagePath = cleanMask.substring(0, lastDotIndex);
+            const parts = packagePath.split('.');
+            const staticParts: string[] = [];
+            for (const part of parts) {
+                if (part.includes('*') || part.includes('?')) break;
+                staticParts.push(part);
+            }
+            if (staticParts.length > 0) {
+                targetFolder = staticParts.join('/');
             }
         }
     }
 
-    // Find common root folder path among all target directories (if any exist)
-    let commonStartUri = rootFolderUri;
-    if (targetFolders.length > 0) {
-        const commonPath = findCommonPathPrefix(targetFolders);
-        if (commonPath) {
-            commonStartUri = vscode.Uri.joinPath(rootFolderUri, commonPath);
-        }
-    }
-
-    return await collectMatchingFiles(commonStartUri, rootFolderUri, nameFilterRegex, token);
-}
-
-function findCommonPathPrefix(paths: string[]): string {
-    if (!paths.length) return '';
-    const splitPaths = paths.map(p => p.split('/'));
-    let commonParts: string[] = [];
-    const first = splitPaths[0];
-
-    for (let i = 0; i < first.length; i++) {
-        const part = first[i];
-        if (splitPaths.every(p => p[i] === part)) {
-            commonParts.push(part);
-        } else {
-            break;
-        }
-    }
-    return commonParts.join('/');
+    const startUri = targetFolder ? vscode.Uri.joinPath(rootFolderUri, targetFolder) : rootFolderUri;
+    return await collectMatchingFiles(startUri, rootFolderUri, nameFilterRegex, token);
 }
 
 async function collectMatchingFiles(
