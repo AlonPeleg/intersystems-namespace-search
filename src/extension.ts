@@ -16,7 +16,11 @@ export function activate(context: vscode.ExtensionContext) {
     const provider = new ISFSSearchWebviewProvider(context.extensionUri);
 
     context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider('isfsNamespaceSearchView', provider)
+        vscode.window.registerWebviewViewProvider('isfsNamespaceSearchView', provider, {
+            webviewOptions: {
+                retainContextWhenHidden: true
+            }
+        })
     );
 }
 
@@ -195,6 +199,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         button:hover { background: var(--vscode-button-hoverBackground); }
         button#stopBtn { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); display: none; }
         button#stopBtn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+        button#clearBtn { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+        button#clearBtn:hover { background: var(--vscode-button-secondaryHoverBackground); }
         #status { font-size: 11px; margin: 10px 0; color: var(--vscode-descriptionForeground); font-style: italic; }
         .file-group { margin-bottom: 10px; }
         .file-header { font-weight: bold; font-size: 12px; color: var(--vscode-symbolIcon-fileForeground, #3794ff); margin-bottom: 2px; word-break: break-all; }
@@ -217,6 +223,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     </div>
     <div class="btn-row">
         <button id="searchBtn">Search</button>
+        <button id="clearBtn">Clear</button>
         <button id="stopBtn">Stop</button>
     </div>
 
@@ -228,9 +235,34 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const queryInput = document.getElementById('query');
         const maskInput = document.getElementById('mask');
         const searchBtn = document.getElementById('searchBtn');
+        const clearBtn = document.getElementById('clearBtn');
         const stopBtn = document.getElementById('stopBtn');
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
+
+        // Restore state on panel reload
+        const previousState = vscode.getState();
+        if (previousState) {
+            if (previousState.query !== undefined) queryInput.value = previousState.query;
+            if (previousState.mask !== undefined) maskInput.value = previousState.mask;
+            if (previousState.resultsHtml !== undefined) resultsDiv.innerHTML = previousState.resultsHtml;
+            if (previousState.statusText !== undefined) statusDiv.textContent = previousState.statusText;
+            
+            // Re-attach listeners to restored HTML elements
+            attachMatchClickListeners();
+        }
+
+        function saveState() {
+            vscode.setState({
+                query: queryInput.value,
+                mask: maskInput.value,
+                resultsHtml: resultsDiv.innerHTML,
+                statusText: statusDiv.textContent
+            });
+        }
+
+        queryInput.addEventListener('input', saveState);
+        maskInput.addEventListener('input', saveState);
 
         searchBtn.addEventListener('click', () => {
             const query = queryInput.value.trim();
@@ -238,7 +270,14 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             if (!query) return;
 
             resultsDiv.innerHTML = '';
+            saveState();
             vscode.postMessage({ type: 'startSearch', query, mask });
+        });
+
+        clearBtn.addEventListener('click', () => {
+            resultsDiv.innerHTML = '';
+            statusDiv.textContent = 'Ready';
+            saveState();
         });
 
         stopBtn.addEventListener('click', () => {
@@ -251,20 +290,26 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 case 'searchStarted':
                     statusDiv.textContent = 'Preparing search...';
                     searchBtn.style.display = 'none';
+                    clearBtn.style.display = 'none';
                     stopBtn.style.display = 'block';
+                    saveState();
                     break;
                 case 'statusUpdate':
                     statusDiv.textContent = msg.message;
+                    saveState();
                     break;
                 case 'addMatches':
                     renderFileMatches(msg.fileName, msg.uri, msg.matches);
+                    saveState();
                     break;
                 case 'searchCompleted':
                 case 'searchStopped':
                 case 'error':
                     statusDiv.textContent = msg.message || 'Stopped';
                     searchBtn.style.display = 'block';
+                    clearBtn.style.display = 'block';
                     stopBtn.style.display = 'none';
+                    saveState();
                     break;
             }
         });
@@ -281,7 +326,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             matches.forEach(m => {
                 const item = document.createElement('div');
                 item.className = 'match-item';
+                item.setAttribute('data-uri', m.uri);
+                item.setAttribute('data-line', m.line);
+                item.setAttribute('data-column', m.column);
                 item.innerHTML = '<span class="line-num">:' + (m.line + 1) + '</span>' + escapeHtml(m.lineText);
+                
                 item.addEventListener('click', () => {
                     vscode.postMessage({ type: 'openMatch', uri: m.uri, line: m.line, column: m.column });
                 });
@@ -289,6 +338,18 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             });
 
             resultsDiv.appendChild(group);
+        }
+
+        function attachMatchClickListeners() {
+            const items = resultsDiv.querySelectorAll('.match-item');
+            items.forEach(item => {
+                item.addEventListener('click', () => {
+                    const uri = item.getAttribute('data-uri');
+                    const line = parseInt(item.getAttribute('data-line'), 10);
+                    const column = parseInt(item.getAttribute('data-column'), 10);
+                    vscode.postMessage({ type: 'openMatch', uri, line, column });
+                });
+            });
         }
 
         function escapeHtml(text) {
