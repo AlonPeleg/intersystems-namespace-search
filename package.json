@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Background concurrent ISFS search with optimized direct path target resolution.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "alonpe",
   "engines": {
     "vscode": "^1.80.0"
@@ -39,6 +39,29 @@
           "icon": "$(search)"
         }
       ]
+    },
+    "configuration": {
+      "title": "ISFS Namespace Search",
+      "properties": {
+        "isfsNamespaceSearch.dirConcurrency": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "description": "How many ISFS directory listings run in parallel while resolving a package path. Higher is faster for wide packages but puts more concurrent load on the IRIS server. Was fixed at 2; raise or lower to match your server."
+        },
+        "isfsNamespaceSearch.fileConcurrency": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "description": "How many files are read and scanned in parallel once the target file list is resolved. Higher is faster for searches over many files but puts more concurrent load on the IRIS server. Was fixed at 2; raise or lower to match your server."
+        },
+        "isfsNamespaceSearch.pauseBetweenReadsMs": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Artificial delay (ms) inserted before every ISFS read/list call, on top of the concurrency limits above. Was fixed at 15ms for every single read, which added up to real seconds on searches touching many files or folders. Defaults to 0 (rely on the concurrency settings alone); raise it only if your IRIS server needs a gentler pace."
+        }
+      }
     }
   },
   "devDependencies": {

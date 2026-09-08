@@ -8,9 +8,60 @@ interface MatchResult {
     uri: string;
 }
 
-const DIR_CONCURRENCY = 2;
-const FILE_CONCURRENCY = 2;
-const PAUSE_BETWEEN_READS_MS = 15;
+// Defaults used when the corresponding setting (see package.json) is unset.
+// Every one of these fs calls is a network round-trip to the IRIS server via
+// ISFS, so concurrency and pause mostly trade search speed against load
+// placed on that server - raise them if your server can take it, lower them
+// if searches start erroring out under load.
+const DEFAULT_DIR_CONCURRENCY = 6;
+const DEFAULT_FILE_CONCURRENCY = 8;
+const DEFAULT_PAUSE_BETWEEN_READS_MS = 0;
+
+interface SearchTuning {
+    dirConcurrency: number;
+    fileConcurrency: number;
+    pauseBetweenReadsMs: number;
+}
+
+function getSearchTuning(): SearchTuning {
+    const cfg = vscode.workspace.getConfiguration('isfsNamespaceSearch');
+    const clampInt = (value: unknown, fallback: number, min: number) => {
+        const n = typeof value === 'number' ? Math.floor(value) : NaN;
+        return Number.isFinite(n) && n >= min ? n : fallback;
+    };
+    return {
+        dirConcurrency: clampInt(cfg.get('dirConcurrency'), DEFAULT_DIR_CONCURRENCY, 1),
+        fileConcurrency: clampInt(cfg.get('fileConcurrency'), DEFAULT_FILE_CONCURRENCY, 1),
+        pauseBetweenReadsMs: clampInt(cfg.get('pauseBetweenReadsMs'), DEFAULT_PAUSE_BETWEEN_READS_MS, 0)
+    };
+}
+
+// Dedupes concurrent/duplicate directory listings for the same folder within
+// a single search run - e.g. when two file masks resolve into overlapping
+// package subtrees, each folder gets listed once instead of once per mask.
+type DirCache = Map<string, Promise<[string, vscode.FileType][]>>;
+
+async function readDirCached(
+    cache: DirCache,
+    uri: vscode.Uri,
+    pauseMs: number,
+    _token: vscode.CancellationToken
+): Promise<[string, vscode.FileType][]> {
+    const key = uri.toString();
+    let pending = cache.get(key);
+    if (!pending) {
+        pending = (async () => {
+            if (pauseMs > 0) await sleep(pauseMs);
+            return vscode.workspace.fs.readDirectory(uri);
+        })();
+        cache.set(key, pending);
+    }
+    try {
+        return await pending;
+    } catch {
+        return [];
+    }
+}
 
 export function activate(context: vscode.ExtensionContext) {
     const provider = new ISFSSearchWebviewProvider(context.extensionUri);
@@ -176,6 +227,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             mask: masks.join(',')
         });
 
+        const tuning = getSearchTuning();
+        const dirCache: DirCache = new Map();
+
         try {
             this._view.webview.postMessage({
                 type: 'statusUpdate',
@@ -183,7 +237,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 message: 'Resolving target paths in parallel...'
             });
 
-            const resolutionPromises = masks.map(m => resolveSingleMaskFast(folder.uri, m, token));
+            const resolutionPromises = masks.map(m => resolveSingleMaskFast(folder.uri, m, token, tuning, dirCache));
             const nestedResults = await Promise.all(resolutionPromises);
 
             if (token.isCancellationRequested) {
@@ -219,21 +273,25 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             let processed = 0;
             let totalMatches = 0;
 
-            await runWithConcurrency(targetFiles, FILE_CONCURRENCY, token, async (fileUri) => {
+            await runWithConcurrency(targetFiles, tuning.fileConcurrency, token, async (fileUri) => {
                 if (token.isCancellationRequested) return;
 
                 try {
-                    await sleep(PAUSE_BETWEEN_READS_MS);
+                    if (tuning.pauseBetweenReadsMs > 0) await sleep(tuning.pauseBetweenReadsMs);
 
                     const fileBytes = await vscode.workspace.fs.readFile(fileUri);
                     const content = new TextDecoder('utf-8').decode(fileBytes);
                     const lines = content.split(/\r?\n/);
                     const matches: MatchResult[] = [];
 
+                    // One regex per file instead of one per line - same matching
+                    // behavior (reset lastIndex before each line), far fewer
+                    // RegExp allocations on files with many lines.
+                    const fileRegex = new RegExp(searchRegex.source, searchRegex.flags);
                     lines.forEach((lineText, lineIdx) => {
-                        const regexCopy = new RegExp(searchRegex.source, searchRegex.flags);
+                        fileRegex.lastIndex = 0;
                         let match: RegExpExecArray | null;
-                        while ((match = regexCopy.exec(lineText)) !== null) {
+                        while ((match = fileRegex.exec(lineText)) !== null) {
                             const fileName = fileUri.path.split('/').pop() || 'Unknown';
                             matches.push({
                                 fileName,
@@ -243,7 +301,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                                 uri: fileUri.toString()
                             });
                             totalMatches++;
-                            if (!regexCopy.global) break;
+                            // Guard against zero-length matches (e.g. a bare "*"
+                            // wildcard) spinning forever at the same index.
+                            if (match.index === fileRegex.lastIndex) fileRegex.lastIndex++;
                         }
                     });
 
@@ -1331,7 +1391,9 @@ function sleep(ms: number): Promise<void> {
 async function resolveSingleMaskFast(
     rootFolderUri: vscode.Uri,
     singleMask: string,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    tuning: SearchTuning,
+    dirCache: DirCache
 ): Promise<vscode.Uri[]> {
     const cleanMask = singleMask.trim();
     if (!cleanMask) return [];
@@ -1366,14 +1428,14 @@ async function resolveSingleMaskFast(
     // of being wrongly restricted to just the root folder.
     const startsWithWildcard = cleanMask.startsWith('*') || cleanMask.startsWith('?');
     if (!cleanMask.includes('.') && !startsWithWildcard) {
-        return await collectMatchingFilesShallow(rootFolderUri, rootFolderUri, nameFilterRegex, token);
+        return await collectMatchingFilesShallow(rootFolderUri, rootFolderUri, nameFilterRegex, token, tuning, dirCache);
     }
 
     const lastDotIndex = cleanMask.lastIndexOf('.');
     if (lastDotIndex <= 0) {
         // No package path could be derived at all (e.g. a mask starting with
         // a bare dot) - nothing to narrow the search to.
-        return await collectMatchingFiles(rootFolderUri, rootFolderUri, nameFilterRegex, token);
+        return await collectMatchingFiles(rootFolderUri, rootFolderUri, nameFilterRegex, token, tuning, dirCache);
     }
 
     // Walk down the package path one dot-segment at a time. A literal segment
@@ -1388,11 +1450,11 @@ async function resolveSingleMaskFast(
     const packagePath = cleanMask.substring(0, lastDotIndex);
     const segments = buildPathSegmentPlan(packagePath.split('.'));
 
-    const candidateFolders = await resolveSegmentedFolders(rootFolderUri, segments, 0, token);
+    const candidateFolders = await resolveSegmentedFolders(rootFolderUri, segments, 0, token, tuning, dirCache);
     if (candidateFolders.length === 0 || token.isCancellationRequested) return [];
 
-    const nestedFileResults = await mapWithConcurrency(candidateFolders, DIR_CONCURRENCY, token, folderUri =>
-        collectMatchingFiles(folderUri, rootFolderUri, nameFilterRegex, token)
+    const nestedFileResults = await mapWithConcurrency(candidateFolders, tuning.dirConcurrency, token, folderUri =>
+        collectMatchingFiles(folderUri, rootFolderUri, nameFilterRegex, token, tuning, dirCache)
     );
 
     const uniqueFiles = new Map<string, vscode.Uri>();
@@ -1431,7 +1493,9 @@ async function resolveSegmentedFolders(
     currentUri: vscode.Uri,
     segments: PathSegmentMatcher[],
     index: number,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    tuning: SearchTuning,
+    dirCache: DirCache
 ): Promise<vscode.Uri[]> {
     if (token.isCancellationRequested) return [];
     if (index >= segments.length) return [currentUri];
@@ -1440,23 +1504,17 @@ async function resolveSegmentedFolders(
 
     if (!segment.isWildcard) {
         const nextUri = vscode.Uri.joinPath(currentUri, segment.literal);
-        return resolveSegmentedFolders(nextUri, segments, index + 1, token);
+        return resolveSegmentedFolders(nextUri, segments, index + 1, token, tuning, dirCache);
     }
 
-    let entries: [string, vscode.FileType][];
-    try {
-        await sleep(PAUSE_BETWEEN_READS_MS);
-        entries = await vscode.workspace.fs.readDirectory(currentUri);
-    } catch {
-        return [];
-    }
+    const entries = await readDirCached(dirCache, currentUri, tuning.pauseBetweenReadsMs, token);
 
     const matchingDirs = entries
         .filter(([name, type]) => type === vscode.FileType.Directory && segment.regex!.test(name))
         .map(([name]) => vscode.Uri.joinPath(currentUri, name));
 
-    const nestedResults = await mapWithConcurrency(matchingDirs, DIR_CONCURRENCY, token, dirUri =>
-        resolveSegmentedFolders(dirUri, segments, index + 1, token)
+    const nestedResults = await mapWithConcurrency(matchingDirs, tuning.dirConcurrency, token, dirUri =>
+        resolveSegmentedFolders(dirUri, segments, index + 1, token, tuning, dirCache)
     );
 
     const flattened: vscode.Uri[] = [];
@@ -1472,18 +1530,14 @@ async function collectMatchingFilesShallow(
     dirUri: vscode.Uri,
     rootFolderUri: vscode.Uri,
     nameFilterRegex: RegExp,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    tuning: SearchTuning,
+    dirCache: DirCache
 ): Promise<vscode.Uri[]> {
     const fileUris: vscode.Uri[] = [];
     if (token.isCancellationRequested) return fileUris;
 
-    let entries: [string, vscode.FileType][];
-    try {
-        await sleep(PAUSE_BETWEEN_READS_MS);
-        entries = await vscode.workspace.fs.readDirectory(dirUri);
-    } catch {
-        return fileUris;
-    }
+    const entries = await readDirCached(dirCache, dirUri, tuning.pauseBetweenReadsMs, token);
 
     for (const [name, type] of entries) {
         if (token.isCancellationRequested) return fileUris;
@@ -1505,20 +1559,16 @@ async function collectMatchingFiles(
     startUri: vscode.Uri,
     rootFolderUri: vscode.Uri,
     nameFilterRegex: RegExp,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    tuning: SearchTuning,
+    dirCache: DirCache
 ): Promise<vscode.Uri[]> {
     const fileUris: vscode.Uri[] = [];
 
     async function walk(currentUri: vscode.Uri) {
         if (token.isCancellationRequested) return;
 
-        let entries: [string, vscode.FileType][];
-        try {
-            await sleep(PAUSE_BETWEEN_READS_MS);
-            entries = await vscode.workspace.fs.readDirectory(currentUri);
-        } catch {
-            return;
-        }
+        const entries = await readDirCached(dirCache, currentUri, tuning.pauseBetweenReadsMs, token);
 
         const subDirs: vscode.Uri[] = [];
         for (const [name, type] of entries) {
@@ -1536,7 +1586,7 @@ async function collectMatchingFiles(
             }
         }
 
-        await runWithConcurrency(subDirs, DIR_CONCURRENCY, token, walk);
+        await runWithConcurrency(subDirs, tuning.dirConcurrency, token, walk);
     }
 
     await walk(startUri);
