@@ -85,7 +85,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     this.cancelSearchForNamespace(namespaceId);
                     const source = new vscode.CancellationTokenSource();
                     this._cancellationTokenSources.set(namespaceId, source);
-                    this.executeThrottledSearch(data.query, data.masks, namespaceId, source);
+                    const useWildcards = data.useWildcards !== false;
+                    this.executeThrottledSearch(data.query, data.masks, namespaceId, useWildcards, source);
                     break;
                 }
                 case 'stopSearch': {
@@ -131,6 +132,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         query: string,
         masks: string[],
         namespaceId: string,
+        useWildcards: boolean,
         source: vscode.CancellationTokenSource
     ) {
         if (!this._view) return;
@@ -150,7 +152,22 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        const searchRegex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        // With wildcards on, '*' and '?' in the search text act as wildcards,
+        // same as in the file mask field: '*' matches any run of characters
+        // (e.g. "$zaccessor.*.getByList" matches "$zaccessor.Offer.getByList"),
+        // '?' matches exactly one character. Everything else is escaped so
+        // it's matched literally. With wildcards off, '*' and '?' are escaped
+        // too, so code containing a literal '*' (e.g. $P(test,"*",1)) can
+        // still be searched for as-is.
+        const searchRegex = useWildcards
+            ? new RegExp(
+                query
+                    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                    .replace(/\*/g, '.*')
+                    .replace(/\?/g, '.'),
+                'gi'
+            )
+            : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
 
         this._view.webview.postMessage({
             type: 'searchStarted',
@@ -316,6 +333,26 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             line-height: 1.4;
         }
 
+        .checkbox-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            margin-top: 6px;
+            font-size: 10px;
+            font-weight: normal;
+            text-transform: none;
+            letter-spacing: normal;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            line-height: 1.4;
+        }
+
+        .checkbox-row input[type="checkbox"] {
+            margin: 1px 0 0 0;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+
         .mask-row {
             display: flex;
             gap: 4px;
@@ -340,41 +377,114 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             border-color: var(--vscode-focusBorder);
         }
 
-        /* Namespace Tabs */
-        #namespaceTabs {
+        /* Namespace picker: a compact dropdown button, better suited to a
+           narrow sidebar than a row of tabs that needs horizontal scrolling.
+           Each namespace still keeps its own independent search state (see
+           nsState below) - this only changes how you pick which one is active. */
+        .namespace-picker {
+            position: relative;
+        }
+
+        .namespace-picker-btn {
+            width: 100%;
+            box-sizing: border-box;
             display: flex;
-            flex-wrap: wrap;
-            gap: 4px;
-        }
-
-        .namespace-tab {
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-            border: 1px solid transparent;
-            padding: 4px 9px;
-            font-size: 11px;
-            cursor: pointer;
-            border-radius: 3px;
-            display: inline-flex;
             align-items: center;
-            gap: 5px;
-            max-width: 160px;
+            justify-content: space-between;
+            gap: 8px;
+            background: var(--vscode-dropdown-background, var(--vscode-input-background));
+            color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+            border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, transparent));
+            padding: 5px 8px;
+            font-size: 12px;
+            border-radius: 2px;
+            cursor: pointer;
         }
 
-        .namespace-tab span.tab-label {
+        .namespace-picker-btn:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+
+        .namespace-picker-btn.open,
+        .namespace-picker-btn:focus {
+            border-color: var(--vscode-focusBorder);
+            outline: none;
+        }
+
+        .namespace-picker-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .namespace-picker-label {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            overflow: hidden;
+            min-width: 0;
+        }
+
+        .namespace-picker-label .label-text {
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
         }
 
-        .namespace-tab:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+        .namespace-picker-caret {
+            flex-shrink: 0;
+            font-size: 10px;
+            color: var(--vscode-descriptionForeground);
+            transition: transform 0.1s ease;
         }
 
-        .namespace-tab.active {
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border-color: var(--vscode-focusBorder);
+        .namespace-picker-btn.open .namespace-picker-caret {
+            transform: rotate(180deg);
+        }
+
+        .namespace-dropdown {
+            position: absolute;
+            top: calc(100% + 3px);
+            left: 0;
+            right: 0;
+            z-index: 20;
+            background: var(--vscode-dropdown-background, var(--vscode-sideBar-background));
+            border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.3)));
+            border-radius: 3px;
+            max-height: 200px;
+            overflow-y: auto;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+        }
+
+        .namespace-option {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 8px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .namespace-option .label-text {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .namespace-option:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+
+        .namespace-option.active {
+            background: var(--vscode-list-activeSelectionBackground, var(--vscode-button-background));
+            color: var(--vscode-list-activeSelectionForeground, var(--vscode-button-foreground));
+        }
+
+        .namespace-empty-option {
+            padding: 7px 8px;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
         }
 
         .tab-searching-dot {
@@ -389,11 +499,6 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         @keyframes tab-pulse {
             0%, 100% { opacity: 0.4; }
             50% { opacity: 1; }
-        }
-
-        .namespace-empty {
-            font-size: 11px;
-            color: var(--vscode-descriptionForeground);
         }
 
         .icon-btn {
@@ -613,11 +718,21 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 <body>
     <div class="input-group">
         <label>Namespace</label>
-        <div id="namespaceTabs"></div>
+        <div class="namespace-picker" id="namespacePicker">
+            <button type="button" id="namespacePickerBtn" class="namespace-picker-btn">
+                <span id="namespacePickerLabel" class="namespace-picker-label"><span class="label-text">No namespace folders found</span></span>
+                <span class="namespace-picker-caret">▾</span>
+            </button>
+            <div id="namespaceDropdown" class="namespace-dropdown" hidden></div>
+        </div>
     </div>
     <div class="input-group">
         <label>Search Text</label>
         <input type="text" id="query" placeholder="Search term..." />
+        <label class="checkbox-row">
+            <input type="checkbox" id="useWildcardsCheckbox" checked />
+            <span>Use wildcards (<code>*</code> = any characters, <code>?</code> = one character). Turn off to search for a literal <code>*</code> or <code>?</code>.</span>
+        </label>
     </div>
     <div class="input-group">
         <label>File Mask / Package</label>
@@ -645,8 +760,12 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
     <script>
         const vscode = acquireVsCodeApi();
-        const namespaceTabsEl = document.getElementById('namespaceTabs');
+        const namespacePickerEl = document.getElementById('namespacePicker');
+        const namespacePickerBtn = document.getElementById('namespacePickerBtn');
+        const namespacePickerLabel = document.getElementById('namespacePickerLabel');
+        const namespaceDropdownEl = document.getElementById('namespaceDropdown');
         const queryInput = document.getElementById('query');
+        const useWildcardsCheckbox = document.getElementById('useWildcardsCheckbox');
         const masksContainer = document.getElementById('masksContainer');
         const addMaskBtn = document.getElementById('addMaskBtn');
         const searchBtn = document.getElementById('searchBtn');
@@ -655,6 +774,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
         const historyContainer = document.getElementById('historyContainer');
+
+        setupNamespacePicker();
 
         const DEFAULT_MASKS = ['*.cls,*.mac,*.int'];
 
@@ -669,6 +790,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         function createDefaultNsState() {
             return {
                 query: '',
+                useWildcards: true,
                 masks: DEFAULT_MASKS.slice(),
                 resultsHtml: '',
                 matchCount: 0,
@@ -693,6 +815,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             if (activeNamespace && nsState[activeNamespace]) {
                 const state = getNsState(activeNamespace);
                 queryInput.value = state.query || '';
+                useWildcardsCheckbox.checked = state.useWildcards !== false;
                 restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS);
                 resultsDiv.innerHTML = state.resultsHtml || '';
                 statusDiv.textContent = state.statusText || 'Ready';
@@ -700,7 +823,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 updateSearchButtonsForActiveTab();
                 attachListeners();
             }
-            renderTabs();
+            renderNamespacePicker();
         }
 
         // Ask the extension for the current (and always up to date) list of
@@ -724,6 +847,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             if (activeNamespace) {
                 const state = getNsState(activeNamespace);
                 state.query = queryInput.value;
+                state.useWildcards = useWildcardsCheckbox.checked;
                 state.masks = getMaskValues();
             }
             vscode.setState({ namespaces, activeNamespace, nsState });
@@ -745,7 +869,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 resultsDiv.innerHTML = '';
                 historyContainer.innerHTML = '';
                 statusDiv.textContent = 'No ISFS namespace folders open.';
-                renderTabs();
+                renderNamespacePicker();
                 saveState();
                 return;
             }
@@ -755,45 +879,110 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             if (!activeNamespace || !validIds.has(activeNamespace)) {
                 switchToNamespace(namespaces[0].id);
             } else {
-                renderTabs();
+                renderNamespacePicker();
                 saveState();
             }
         }
 
-        function renderTabs() {
-            namespaceTabsEl.innerHTML = '';
+        // Renders both the closed picker button (active namespace name, plus a
+        // pulsing dot if that namespace has a search running) and the dropdown
+        // list of every open namespace. A vertical list is a better fit for a
+        // narrow sidebar than a row of tabs: full names are readable without
+        // truncation or horizontal scrolling, and it scales to any number of
+        // open namespaces. Each namespace still keeps its own independent
+        // search state (see nsState) - this only changes how you pick one.
+        function renderNamespacePicker() {
+            const activeNs = namespaces.find(ns => ns.id === activeNamespace);
+
+            namespacePickerLabel.innerHTML = '';
+            const textSpan = document.createElement('span');
+            textSpan.className = 'label-text';
+            textSpan.textContent = activeNs
+                ? activeNs.label
+                : (namespaces.length === 0 ? 'No namespace folders found' : 'Select a namespace');
+            namespacePickerLabel.appendChild(textSpan);
+
+            if (activeNs && getNsState(activeNs.id).searching) {
+                const dot = document.createElement('span');
+                dot.className = 'tab-searching-dot';
+                dot.title = 'Search in progress';
+                namespacePickerLabel.appendChild(dot);
+            }
+
+            namespacePickerBtn.disabled = namespaces.length === 0;
+            namespacePickerBtn.title = activeNs ? activeNs.label : '';
+
+            renderNamespaceDropdownOptions();
+        }
+
+        function renderNamespaceDropdownOptions() {
+            namespaceDropdownEl.innerHTML = '';
 
             if (namespaces.length === 0) {
-                const empty = document.createElement('span');
-                empty.className = 'namespace-empty';
-                empty.textContent = 'No namespace folders found';
-                namespaceTabsEl.appendChild(empty);
+                const empty = document.createElement('div');
+                empty.className = 'namespace-empty-option';
+                empty.textContent = 'No ISFS namespace folders open.';
+                namespaceDropdownEl.appendChild(empty);
                 return;
             }
 
             namespaces.forEach(ns => {
-                const tab = document.createElement('button');
-                tab.type = 'button';
-                tab.className = 'namespace-tab' + (ns.id === activeNamespace ? ' active' : '');
-                tab.title = ns.label;
+                const option = document.createElement('div');
+                option.className = 'namespace-option' + (ns.id === activeNamespace ? ' active' : '');
+                option.title = ns.label;
 
-                const labelSpan = document.createElement('span');
-                labelSpan.className = 'tab-label';
-                labelSpan.textContent = ns.label;
-                tab.appendChild(labelSpan);
+                const textSpan = document.createElement('span');
+                textSpan.className = 'label-text';
+                textSpan.textContent = ns.label;
+                option.appendChild(textSpan);
 
                 if (getNsState(ns.id).searching) {
                     const dot = document.createElement('span');
                     dot.className = 'tab-searching-dot';
                     dot.title = 'Search in progress';
-                    tab.appendChild(dot);
+                    option.appendChild(dot);
                 }
 
-                tab.addEventListener('click', () => {
+                option.addEventListener('click', () => {
+                    closeNamespaceDropdown();
                     if (ns.id !== activeNamespace) switchToNamespace(ns.id);
                 });
 
-                namespaceTabsEl.appendChild(tab);
+                namespaceDropdownEl.appendChild(option);
+            });
+        }
+
+        function openNamespaceDropdown() {
+            if (namespaces.length === 0) return;
+            namespaceDropdownEl.hidden = false;
+            namespacePickerBtn.classList.add('open');
+        }
+
+        function closeNamespaceDropdown() {
+            namespaceDropdownEl.hidden = true;
+            namespacePickerBtn.classList.remove('open');
+        }
+
+        function setupNamespacePicker() {
+            namespacePickerBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (namespaceDropdownEl.hidden) {
+                    openNamespaceDropdown();
+                } else {
+                    closeNamespaceDropdown();
+                }
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!namespaceDropdownEl.hidden && !namespacePickerEl.contains(e.target)) {
+                    closeNamespaceDropdown();
+                }
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && !namespaceDropdownEl.hidden) {
+                    closeNamespaceDropdown();
+                }
             });
         }
 
@@ -802,13 +991,14 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const state = getNsState(nsId);
 
             queryInput.value = state.query || '';
+            useWildcardsCheckbox.checked = state.useWildcards !== false;
             restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS);
             resultsDiv.innerHTML = state.resultsHtml || '';
             statusDiv.textContent = state.statusText || 'Ready';
             renderHistoryFor(nsId);
             updateSearchButtonsForActiveTab();
             attachListeners();
-            renderTabs();
+            renderNamespacePicker();
             saveState();
         }
 
@@ -870,6 +1060,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
 
         queryInput.addEventListener('input', saveState);
+        useWildcardsCheckbox.addEventListener('change', saveState);
         addMaskBtn.addEventListener('click', () => {
             addMaskRow('', false);
             saveState();
@@ -878,6 +1069,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         searchBtn.addEventListener('click', () => {
             const query = queryInput.value.trim();
             const maskList = getMaskValues();
+            const useWildcards = useWildcardsCheckbox.checked;
 
             if (!query) return;
             if (!activeNamespace) {
@@ -890,6 +1082,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
             const state = getNsState(nsId);
             state.query = query;
+            state.useWildcards = useWildcards;
             state.masks = maskList;
             state.resultsHtml = '';
             state.matchCount = 0;
@@ -900,10 +1093,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             resultsDiv.innerHTML = '';
             statusDiv.textContent = state.statusText;
             updateSearchButtonsForActiveTab();
-            renderTabs();
+            renderNamespacePicker();
             saveState();
 
-            vscode.postMessage({ type: 'startSearch', query, masks: maskList, namespaceId: nsId });
+            vscode.postMessage({ type: 'startSearch', query, masks: maskList, namespaceId: nsId, useWildcards });
         });
 
         clearBtn.addEventListener('click', () => {
@@ -951,7 +1144,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                         statusDiv.textContent = state.statusText;
                         updateSearchButtonsForActiveTab();
                     }
-                    renderTabs();
+                    renderNamespacePicker();
                     saveState();
                     break;
                 case 'statusUpdate':
@@ -974,7 +1167,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                         statusDiv.textContent = state.statusText;
                         updateSearchButtonsForActiveTab();
                     }
-                    renderTabs();
+                    renderNamespacePicker();
                     saveState();
                     break;
                 case 'searchStopped':
@@ -985,7 +1178,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                         statusDiv.textContent = state.statusText;
                         updateSearchButtonsForActiveTab();
                     }
-                    renderTabs();
+                    renderNamespacePicker();
                     saveState();
                     break;
             }
@@ -1158,35 +1351,121 @@ async function resolveSingleMaskFast(
         }
     }
 
-    // A mask with no package qualifier at all (no dots, e.g. "WBLR*") has
-    // nothing to narrow the search to, so rather than walking the entire
-    // namespace tree looking for it, treat it as a same-level lookup: only
-    // the direct children of the namespace root are checked. Un-packaged
-    // classes/routines live directly under the root in ISFS, so this keeps a
-    // broad prefix like "WBLR*" fast instead of scanning every package.
+    // A mask with no package qualifier at all (no dots, e.g. "WBLR*") and a
+    // literal prefix has nothing to narrow the search to beyond the root, so
+    // rather than walking the entire namespace tree looking for it, treat it
+    // as a same-level lookup: only the direct children of the namespace root
+    // are checked. Un-packaged classes/routines live directly under the root
+    // in ISFS, so this keeps a broad prefix like "WBLR*" fast instead of
+    // scanning every package.
     // A mask that does contain a dot (e.g. "Tafnit.App.Something.*") is
     // resolved to its package folder below and searched recursively from there.
-    if (!cleanMask.includes('.')) {
+    // But a mask that STARTS with a wildcard (e.g. "*LRSHOW*") has no literal
+    // prefix at all to anchor on - the match could be nested inside any
+    // package - so it falls through to the full recursive walk below instead
+    // of being wrongly restricted to just the root folder.
+    const startsWithWildcard = cleanMask.startsWith('*') || cleanMask.startsWith('?');
+    if (!cleanMask.includes('.') && !startsWithWildcard) {
         return await collectMatchingFilesShallow(rootFolderUri, rootFolderUri, nameFilterRegex, token);
     }
 
-    let targetFolder: string | null = null;
     const lastDotIndex = cleanMask.lastIndexOf('.');
-    if (lastDotIndex > 0) {
-        const packagePath = cleanMask.substring(0, lastDotIndex);
-        const parts = packagePath.split('.');
-        const staticParts: string[] = [];
-        for (const part of parts) {
-            if (part.includes('*') || part.includes('?')) break;
-            staticParts.push(part);
-        }
-        if (staticParts.length > 0) {
-            targetFolder = staticParts.join('/');
-        }
+    if (lastDotIndex <= 0) {
+        // No package path could be derived at all (e.g. a mask starting with
+        // a bare dot) - nothing to narrow the search to.
+        return await collectMatchingFiles(rootFolderUri, rootFolderUri, nameFilterRegex, token);
     }
 
-    const startUri = targetFolder ? vscode.Uri.joinPath(rootFolderUri, targetFolder) : rootFolderUri;
-    return await collectMatchingFiles(startUri, rootFolderUri, nameFilterRegex, token);
+    // Walk down the package path one dot-segment at a time. A literal segment
+    // (e.g. "App") is a direct, zero-cost path join - no directory listing
+    // needed. Only a wildcarded segment (e.g. "*" in "Tafnit.*.UI.bl.*")
+    // requires listing its parent directory, and even then only to fan out
+    // over that one level's subdirectories - not to walk every file beneath
+    // them. This means a pattern like "Tafnit.*.UI.bl.*" only lists Tafnit's
+    // direct children and checks each for a "UI/bl" subpath, instead of
+    // recursively walking the entire Tafnit tree (which is what made a
+    // mid-path wildcard so slow before).
+    const packagePath = cleanMask.substring(0, lastDotIndex);
+    const segments = buildPathSegmentPlan(packagePath.split('.'));
+
+    const candidateFolders = await resolveSegmentedFolders(rootFolderUri, segments, 0, token);
+    if (candidateFolders.length === 0 || token.isCancellationRequested) return [];
+
+    const nestedFileResults = await mapWithConcurrency(candidateFolders, DIR_CONCURRENCY, token, folderUri =>
+        collectMatchingFiles(folderUri, rootFolderUri, nameFilterRegex, token)
+    );
+
+    const uniqueFiles = new Map<string, vscode.Uri>();
+    for (const list of nestedFileResults) {
+        // A batch cancelled partway through leaves later slots unset.
+        if (!list) continue;
+        for (const uri of list) uniqueFiles.set(uri.toString(), uri);
+    }
+    return Array.from(uniqueFiles.values());
+}
+
+interface PathSegmentMatcher {
+    literal: string;
+    isWildcard: boolean;
+    regex?: RegExp;
+}
+
+function buildPathSegmentPlan(parts: string[]): PathSegmentMatcher[] {
+    return parts.map(part => {
+        if (!part.includes('*') && !part.includes('?')) {
+            return { literal: part, isWildcard: false };
+        }
+        const pattern = part
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.');
+        return { literal: part, isWildcard: true, regex: new RegExp(`^${pattern}$`, 'i') };
+    });
+}
+
+// Descends through the package-path segments, resolving to every concrete
+// folder the pattern could point to. Literal segments narrow the path
+// directly with no I/O; wildcard segments list just their parent directory
+// to fan out over its subdirectories for the next segment.
+async function resolveSegmentedFolders(
+    currentUri: vscode.Uri,
+    segments: PathSegmentMatcher[],
+    index: number,
+    token: vscode.CancellationToken
+): Promise<vscode.Uri[]> {
+    if (token.isCancellationRequested) return [];
+    if (index >= segments.length) return [currentUri];
+
+    const segment = segments[index];
+
+    if (!segment.isWildcard) {
+        const nextUri = vscode.Uri.joinPath(currentUri, segment.literal);
+        return resolveSegmentedFolders(nextUri, segments, index + 1, token);
+    }
+
+    let entries: [string, vscode.FileType][];
+    try {
+        await sleep(PAUSE_BETWEEN_READS_MS);
+        entries = await vscode.workspace.fs.readDirectory(currentUri);
+    } catch {
+        return [];
+    }
+
+    const matchingDirs = entries
+        .filter(([name, type]) => type === vscode.FileType.Directory && segment.regex!.test(name))
+        .map(([name]) => vscode.Uri.joinPath(currentUri, name));
+
+    const nestedResults = await mapWithConcurrency(matchingDirs, DIR_CONCURRENCY, token, dirUri =>
+        resolveSegmentedFolders(dirUri, segments, index + 1, token)
+    );
+
+    const flattened: vscode.Uri[] = [];
+    for (const list of nestedResults) {
+        // A batch cancelled partway through leaves later slots unset.
+        if (!list) continue;
+        for (const uri of list) flattened.push(uri);
+    }
+    return flattened;
 }
 
 async function collectMatchingFilesShallow(
@@ -1279,6 +1558,27 @@ async function runWithConcurrency<T>(
         }
     });
     await Promise.all(workers);
+}
+
+// Same throttled-concurrency pattern as runWithConcurrency, but collects each
+// call's return value instead of assuming void.
+async function mapWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    token: vscode.CancellationToken,
+    fn: (item: T) => Promise<R>
+): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let index = 0;
+    const workers = new Array(Math.min(concurrency, items.length)).fill(0).map(async () => {
+        while (index < items.length) {
+            if (token.isCancellationRequested) return;
+            const i = index++;
+            results[i] = await fn(items[i]);
+        }
+    });
+    await Promise.all(workers);
+    return results;
 }
 
 function convertLocationInputToRegex(input: string): RegExp {
