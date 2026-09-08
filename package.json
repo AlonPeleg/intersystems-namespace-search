@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Background concurrent ISFS search with optimized direct path target resolution.",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "publisher": "alonpe",
   "engines": {
     "vscode": "^1.80.0"
@@ -26,7 +26,7 @@
         {
           "id": "isfsNamespaceSearchContainer",
           "title": "ISFS Search",
-          "icon": "$(search)"
+          "icon": "images/isfs-search-icon.svg"
         }
       ]
     },
@@ -36,7 +36,7 @@
           "type": "webview",
           "id": "isfsNamespaceSearchView",
           "name": "Namespace Search",
-          "icon": "$(search)"
+          "icon": "images/isfs-search-icon.svg"
         }
       ]
     },
