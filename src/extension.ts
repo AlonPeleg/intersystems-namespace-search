@@ -364,12 +364,45 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+        html, body {
+            height: 100%;
+        }
+
         body {
             font-family: var(--vscode-font-family);
-            padding: 8px 10px;
+            padding: 0;
+            margin: 0;
             color: var(--vscode-foreground);
             background-color: var(--vscode-sideBar-background);
             box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Everything the user needs to see while scrolling through long
+           result lists (namespace, search text, masks, buttons, status)
+           stays pinned at the top. Only #scrollArea below it scrolls. */
+        #fixedHeader {
+            flex: 0 0 auto;
+            padding: 8px 10px 0 10px;
+            box-sizing: border-box;
+        }
+
+        #scrollArea {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 0 10px 10px 10px;
+            box-sizing: border-box;
+        }
+
+        .tab-panel {
+            display: none;
+        }
+
+        .tab-panel.active {
+            display: block;
         }
 
         .input-group {
@@ -633,49 +666,109 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-descriptionForeground);
         }
 
-        .section-header {
+        /* Tab bar: switches the scrollable area below #fixedHeader between
+           the live "Current Search" results, the "Search History" log, and
+           (once a result row has been clicked) a temporary third tab that
+           shows just that one file's matches. */
+        .tabs-bar {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            margin: 10px 0 0 0;
+            border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+            flex: 0 0 auto;
+            padding: 0 10px;
+            box-sizing: border-box;
+        }
+
+        .tab-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
             font-size: 10px;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin: 14px 0 6px 0;
             color: var(--vscode-descriptionForeground);
-            border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
-            padding-bottom: 4px;
+            padding: 7px 10px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            user-select: none;
+            white-space: nowrap;
         }
 
-        /* Clean Results List */
-        details.file-group {
-            margin-bottom: 6px;
+        .tab-btn:hover {
+            color: var(--vscode-foreground);
         }
 
-        details.file-group > summary.file-header {
+        .tab-btn.active {
+            color: var(--vscode-foreground);
+            border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background));
+        }
+
+        .tab-btn-temp {
+            max-width: 45%;
+            overflow: hidden;
+        }
+
+        .tab-btn-temp .tab-btn-label {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .tab-close-btn {
+            flex-shrink: 0;
+            font-size: 11px;
+            text-transform: none;
+            letter-spacing: normal;
+            font-weight: normal;
+            opacity: 0.7;
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+
+        .tab-close-btn:hover {
+            opacity: 1;
+            background: var(--vscode-list-hoverBackground);
+        }
+
+        /* Clean Results List - each is a flat, clickable row now; clicking it
+           opens the matches in the temporary results tab rather than
+           expanding in place. */
+        .file-group {
+            margin-bottom: 2px;
+            border-radius: 2px;
+        }
+
+        .file-group .file-header {
             font-size: 12px;
             font-weight: 500;
             color: var(--vscode-sideBarTitle-foreground, var(--vscode-foreground));
-            padding: 3px 0;
+            padding: 4px 6px;
             cursor: pointer;
             user-select: none;
-            list-style: none;
             display: flex;
             align-items: center;
+            border-radius: 2px;
         }
 
-        details.file-group > summary.file-header::-webkit-details-marker {
-            display: none;
-        }
-
-        details.file-group > summary.file-header::before {
+        .file-group .file-header::before {
             content: '›';
             display: inline-block;
             margin-right: 6px;
             font-size: 12px;
             line-height: 1;
-            transition: transform 0.1s ease;
         }
 
-        details.file-group[open] > summary.file-header::before {
-            transform: rotate(90deg);
+        .file-group:hover .file-header {
+            background: var(--vscode-list-hoverBackground);
+        }
+
+        .temp-tab-header-info {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            padding: 2px 6px 8px 6px;
         }
 
         .match-item {
@@ -776,47 +869,58 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     </style>
 </head>
 <body>
-    <div class="input-group">
-        <label>Namespace</label>
-        <div class="namespace-picker" id="namespacePicker">
-            <button type="button" id="namespacePickerBtn" class="namespace-picker-btn">
-                <span id="namespacePickerLabel" class="namespace-picker-label"><span class="label-text">No namespace folders found</span></span>
-                <span class="namespace-picker-caret">▾</span>
-            </button>
-            <div id="namespaceDropdown" class="namespace-dropdown" hidden></div>
-        </div>
-    </div>
-    <div class="input-group">
-        <label>Search Text</label>
-        <input type="text" id="query" placeholder="Search term..." />
-        <label class="checkbox-row">
-            <input type="checkbox" id="useWildcardsCheckbox" checked />
-            <span>Use wildcards (<code>*</code> = any characters, <code>?</code> = one character). Turn off to search for a literal <code>*</code> or <code>?</code>.</span>
-        </label>
-    </div>
-    <div class="input-group">
-        <label>File Mask / Package</label>
-        <div id="masksContainer">
-            <div class="mask-row">
-                <input type="text" class="mask-input" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio*.cls" />
-                <button type="button" class="icon-btn" id="addMaskBtn" title="Add mask">+</button>
+    <div id="fixedHeader">
+        <div class="input-group">
+            <label>Namespace</label>
+            <div class="namespace-picker" id="namespacePicker">
+                <button type="button" id="namespacePickerBtn" class="namespace-picker-btn">
+                    <span id="namespacePickerLabel" class="namespace-picker-label"><span class="label-text">No namespace folders found</span></span>
+                    <span class="namespace-picker-caret">▾</span>
+                </button>
+                <div id="namespaceDropdown" class="namespace-dropdown" hidden></div>
             </div>
         </div>
-        <div class="hint">Use <code>Pkg.Sub.*</code> to search inside a package and everything under it. A plain <code>NAME*</code> (no dot) only checks items directly at the namespace root, so it stays fast.</div>
+        <div class="input-group">
+            <label>Search Text</label>
+            <input type="text" id="query" placeholder="Search term..." />
+            <label class="checkbox-row">
+                <input type="checkbox" id="useWildcardsCheckbox" checked />
+                <span>Use wildcards (<code>*</code> = any characters, <code>?</code> = one character). Turn off to search for a literal <code>*</code> or <code>?</code>.</span>
+            </label>
+        </div>
+        <div class="input-group">
+            <label>File Mask / Package</label>
+            <div id="masksContainer">
+                <div class="mask-row">
+                    <input type="text" class="mask-input" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio*.cls" />
+                    <button type="button" class="icon-btn" id="addMaskBtn" title="Add mask">+</button>
+                </div>
+            </div>
+            <div class="hint">Use <code>Pkg.Sub.*</code> to search inside a package and everything under it. A plain <code>NAME*</code> (no dot) only checks items directly at the namespace root, so it stays fast.</div>
+        </div>
+        <div class="btn-row">
+            <button id="searchBtn" class="action-btn">Search</button>
+            <button id="clearBtn" class="action-btn">Clear All</button>
+            <button id="stopBtn" class="action-btn">Stop</button>
+        </div>
+
+        <div id="status">Ready</div>
     </div>
-    <div class="btn-row">
-        <button id="searchBtn" class="action-btn">Search</button>
-        <button id="clearBtn" class="action-btn">Clear All</button>
-        <button id="stopBtn" class="action-btn">Stop</button>
+
+    <div class="tabs-bar" id="tabsBar">
+        <div class="tab-btn active" id="tabBtnCurrent">Current Search</div>
+        <div class="tab-btn" id="tabBtnHistory">Search History</div>
+        <div class="tab-btn tab-btn-temp" id="tabBtnTemp" hidden>
+            <span class="tab-btn-label" id="tempTabLabel"></span>
+            <span class="tab-close-btn" id="tempTabCloseBtn" title="Close tab">✕</span>
+        </div>
     </div>
 
-    <div id="status">Ready</div>
-
-    <div class="section-header">Current Search</div>
-    <div id="results"></div>
-
-    <div class="section-header">Search History</div>
-    <div id="historyContainer"></div>
+    <div id="scrollArea">
+        <div id="results" class="tab-panel active"></div>
+        <div id="historyContainer" class="tab-panel"></div>
+        <div id="tempResults" class="tab-panel"></div>
+    </div>
 
     <script>
         const vscode = acquireVsCodeApi();
@@ -834,8 +938,15 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
         const historyContainer = document.getElementById('historyContainer');
+        const tempResultsDiv = document.getElementById('tempResults');
+        const tabBtnCurrent = document.getElementById('tabBtnCurrent');
+        const tabBtnHistory = document.getElementById('tabBtnHistory');
+        const tabBtnTemp = document.getElementById('tabBtnTemp');
+        const tempTabLabel = document.getElementById('tempTabLabel');
+        const tempTabCloseBtn = document.getElementById('tempTabCloseBtn');
 
         setupNamespacePicker();
+        setupTabs();
 
         const DEFAULT_MASKS = ['*.cls,*.mac,*.int'];
 
@@ -857,7 +968,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 statusText: 'Ready',
                 searching: false,
                 activeSearchInfo: { query: '', mask: '' },
-                history: []
+                history: [],
+                // Which of the three tabs is showing (current / history / temp),
+                // and the temporary "one file's results" tab's own content, if
+                // a result row has been clicked open. Both are per-namespace so
+                // switching namespace tabs restores what was on screen there.
+                activeTab: 'current',
+                tempTab: null
             };
         }
 
@@ -882,6 +999,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 renderHistoryFor(activeNamespace);
                 updateSearchButtonsForActiveTab();
                 attachListeners();
+                if (state.tempTab) renderTempResults(state.tempTab.matches);
+                else tempResultsDiv.innerHTML = '';
+                renderActiveTabUI();
             }
             renderNamespacePicker();
         }
@@ -928,8 +1048,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 queryInput.value = '';
                 resultsDiv.innerHTML = '';
                 historyContainer.innerHTML = '';
+                tempResultsDiv.innerHTML = '';
                 statusDiv.textContent = 'No ISFS namespace folders open.';
                 renderNamespacePicker();
+                renderActiveTabUI();
                 saveState();
                 return;
             }
@@ -1058,6 +1180,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             renderHistoryFor(nsId);
             updateSearchButtonsForActiveTab();
             attachListeners();
+            if (state.tempTab) renderTempResults(state.tempTab.matches);
+            else tempResultsDiv.innerHTML = '';
+            renderActiveTabUI();
             renderNamespacePicker();
             saveState();
         }
@@ -1149,10 +1274,16 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.statusText = 'Preparing search...';
             state.searching = true;
             state.activeSearchInfo = { query, mask: maskList.join(' | ') };
+            // A fresh search invalidates whatever was pinned open in the
+            // temporary results tab, so close it and land back on Current Search.
+            state.tempTab = null;
+            state.activeTab = 'current';
 
             resultsDiv.innerHTML = '';
+            tempResultsDiv.innerHTML = '';
             statusDiv.textContent = state.statusText;
             updateSearchButtonsForActiveTab();
+            renderActiveTabUI();
             renderNamespacePicker();
             saveState();
 
@@ -1167,10 +1298,14 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.history = [];
             state.statusText = 'Ready';
             state.activeSearchInfo = { query: '', mask: '' };
+            state.tempTab = null;
+            state.activeTab = 'current';
 
             resultsDiv.innerHTML = '';
+            tempResultsDiv.innerHTML = '';
             statusDiv.textContent = 'Ready';
             renderHistoryFor(activeNamespace);
+            renderActiveTabUI();
             saveState();
         });
 
@@ -1316,14 +1451,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const contentDiv = document.createElement('div');
             contentDiv.className = 'history-content';
             contentDiv.innerHTML = entry.resultsHtml;
-            contentDiv.querySelectorAll('.match-item').forEach(item => {
-                item.addEventListener('click', () => {
-                    const uri = item.getAttribute('data-uri');
-                    const line = parseInt(item.getAttribute('data-line'), 10);
-                    const column = parseInt(item.getAttribute('data-column'), 10);
-                    vscode.postMessage({ type: 'openMatch', uri, line, column });
-                });
-            });
+            attachFileGroupListeners(contentDiv);
 
             details.appendChild(summary);
             details.appendChild(contentDiv);
@@ -1331,48 +1459,130 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             return details;
         }
 
+        // Builds one flat, clickable row per file (e.g. "Offer.cls (2)").
+        // The individual matches aren't rendered inline any more - they're
+        // stashed on the row as JSON (so it survives being serialized back
+        // out via outerHTML/innerHTML for history/state) and only rendered
+        // into the temporary results tab when the row itself is clicked.
         function buildFileMatchesElement(fileName, uri, matches) {
-            const details = document.createElement('details');
-            details.className = 'file-group';
+            const group = document.createElement('div');
+            group.className = 'file-group';
+            group.setAttribute('data-filename', fileName);
+            group.setAttribute('data-matches', JSON.stringify(matches));
 
-            const summary = document.createElement('summary');
-            summary.className = 'file-header';
-            summary.textContent = fileName + ' (' + matches.length + ')';
-            details.appendChild(summary);
+            const header = document.createElement('div');
+            header.className = 'file-header';
+            header.textContent = fileName + ' (' + matches.length + ')';
+            group.appendChild(header);
+
+            group.addEventListener('click', () => openTempTab(fileName, matches));
+
+            return group;
+        }
+
+        // Re-wires the click-to-open-temp-tab handler on every file-group row
+        // inside a container after that container's markup was restored from
+        // a raw HTML string (innerHTML restores markup but not listeners) -
+        // used for the "Current Search" pane on reload/namespace-switch and
+        // for each Search History entry when it's built.
+        function attachFileGroupListeners(container) {
+            container.querySelectorAll('.file-group').forEach(group => {
+                group.addEventListener('click', () => {
+                    const fileName = group.getAttribute('data-filename') || '';
+                    let matches = [];
+                    try { matches = JSON.parse(group.getAttribute('data-matches') || '[]'); } catch {}
+                    openTempTab(fileName, matches);
+                });
+            });
+        }
+
+        function attachListeners() {
+            attachFileGroupListeners(resultsDiv);
+        }
+
+        // --- Tabs: Current Search / Search History / temporary per-file results ---
+
+        function setupTabs() {
+            tabBtnCurrent.addEventListener('click', () => switchToTab('current'));
+            tabBtnHistory.addEventListener('click', () => switchToTab('history'));
+            tabBtnTemp.addEventListener('click', (e) => {
+                if (e.target === tempTabCloseBtn) {
+                    closeTempTab();
+                } else {
+                    switchToTab('temp');
+                }
+            });
+        }
+
+        function switchToTab(tabName) {
+            if (!activeNamespace) return;
+            const state = getNsState(activeNamespace);
+            if (tabName === 'temp' && !state.tempTab) return;
+            state.activeTab = tabName;
+            renderActiveTabUI();
+            saveState();
+        }
+
+        // Opens (or replaces) the single temporary tab with one file's
+        // matches. There's only ever one temp tab - clicking a different
+        // result row while it's open just swaps its contents.
+        function openTempTab(fileName, matches) {
+            if (!activeNamespace) return;
+            const state = getNsState(activeNamespace);
+            state.tempTab = { label: fileName + ' (' + matches.length + ')', matches };
+            state.activeTab = 'temp';
+            renderTempResults(matches);
+            renderActiveTabUI();
+            saveState();
+        }
+
+        function closeTempTab() {
+            if (!activeNamespace) return;
+            const state = getNsState(activeNamespace);
+            state.tempTab = null;
+            if (state.activeTab === 'temp') state.activeTab = 'current';
+            tempResultsDiv.innerHTML = '';
+            renderActiveTabUI();
+            saveState();
+        }
+
+        function renderTempResults(matches) {
+            tempResultsDiv.innerHTML = '';
+            const info = document.createElement('div');
+            info.className = 'temp-tab-header-info';
+            info.textContent = matches.length + ' match' + (matches.length === 1 ? '' : 'es');
+            tempResultsDiv.appendChild(info);
 
             matches.forEach(m => {
                 const item = document.createElement('div');
                 item.className = 'match-item';
-                item.setAttribute('data-uri', m.uri);
-                item.setAttribute('data-line', m.line);
-                item.setAttribute('data-column', m.column);
                 item.innerHTML = '<span class="line-num">' + (m.line + 1) + '</span>' + escapeHtml(m.lineText);
-
                 item.addEventListener('click', () => {
                     vscode.postMessage({ type: 'openMatch', uri: m.uri, line: m.line, column: m.column });
                 });
-                details.appendChild(item);
+                tempResultsDiv.appendChild(item);
             });
-
-            return details;
         }
 
-        function attachListeners() {
-            // Re-wires click handlers on the "Current Search" results pane after
-            // it is restored verbatim from saved webview state (raw innerHTML
-            // restores markup but not the listeners). Search History entries are
-            // rebuilt fresh from data via buildHistoryTabElement, which already
-            // attaches its own listeners, so nothing to do for those here.
-            const items = resultsDiv.querySelectorAll('.match-item');
-            items.forEach(item => {
-                item.onclick = null;
-                item.addEventListener('click', () => {
-                    const uri = item.getAttribute('data-uri');
-                    const line = parseInt(item.getAttribute('data-line'), 10);
-                    const column = parseInt(item.getAttribute('data-column'), 10);
-                    vscode.postMessage({ type: 'openMatch', uri, line, column });
-                });
-            });
+        // Reflects the active namespace's chosen tab into the tab bar and
+        // which of the three panels in #scrollArea is visible.
+        function renderActiveTabUI() {
+            const state = activeNamespace ? getNsState(activeNamespace) : null;
+            const activeTab = state ? (state.activeTab || 'current') : 'current';
+            const hasTempTab = !!(state && state.tempTab);
+
+            tabBtnTemp.hidden = !hasTempTab;
+            if (hasTempTab) tempTabLabel.textContent = state.tempTab.label;
+
+            const effectiveTab = (activeTab === 'temp' && !hasTempTab) ? 'current' : activeTab;
+
+            tabBtnCurrent.classList.toggle('active', effectiveTab === 'current');
+            tabBtnHistory.classList.toggle('active', effectiveTab === 'history');
+            tabBtnTemp.classList.toggle('active', effectiveTab === 'temp');
+
+            resultsDiv.classList.toggle('active', effectiveTab === 'current');
+            historyContainer.classList.toggle('active', effectiveTab === 'history');
+            tempResultsDiv.classList.toggle('active', effectiveTab === 'temp');
         }
 
         function escapeHtml(text) {
