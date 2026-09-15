@@ -1269,7 +1269,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             margin: 10px 0 0 0;
             border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
             flex: 0 0 auto;
-            padding: 0 10px;
+            padding: 0 10px 0 22px;
             box-sizing: border-box;
         }
 
@@ -1298,25 +1298,24 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background));
         }
 
-        /* Pushes the "clear searches" icon to the far right of the tab bar,
-           past both tab labels. */
-        .tabs-bar-spacer {
-            flex: 1;
-        }
-
-        .tab-clear-all-btn {
-            align-self: center;
+        /* Small "x" living inside each tab label itself (Current Search /
+           Search History), so each can be cleared independently without
+           affecting the other. */
+        .tab-inline-clear-btn {
             background: none;
             border: none;
             color: var(--vscode-descriptionForeground);
             cursor: pointer;
-            padding: 3px 6px;
-            font-size: 12px;
+            padding: 1px 3px;
+            font-size: 11px;
             line-height: 1;
             border-radius: 2px;
+            text-transform: none;
+            letter-spacing: normal;
+            flex-shrink: 0;
         }
 
-        .tab-clear-all-btn:hover {
+        .tab-inline-clear-btn:hover {
             color: var(--vscode-errorForeground);
             background: var(--vscode-list-hoverBackground);
         }
@@ -1535,10 +1534,14 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="tabs-bar" id="tabsBar">
-        <div class="tab-btn active" id="tabBtnCurrent">Current Search</div>
-        <div class="tab-btn" id="tabBtnHistory">Search History</div>
-        <div class="tabs-bar-spacer"></div>
-        <button type="button" class="tab-clear-all-btn" id="clearSearchesBtn" title="Clear current results and search history">✕</button>
+        <div class="tab-btn active" id="tabBtnCurrent">
+            <span>Current Search</span>
+            <button type="button" class="tab-inline-clear-btn" id="clearCurrentBtn" title="Clear current results">✕</button>
+        </div>
+        <div class="tab-btn" id="tabBtnHistory">
+            <span>Search History</span>
+            <button type="button" class="tab-inline-clear-btn" id="clearHistoryBtn" title="Clear search history">✕</button>
+        </div>
     </div>
 
     <div id="scrollArea">
@@ -1570,7 +1573,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const stopBtn = document.getElementById('stopBtn');
         const clearQueryBtn = document.getElementById('clearQueryBtn');
         const clearMasksBtn = document.getElementById('clearMasksBtn');
-        const clearSearchesBtn = document.getElementById('clearSearchesBtn');
+        const clearCurrentBtn = document.getElementById('clearCurrentBtn');
+        const clearHistoryBtn = document.getElementById('clearHistoryBtn');
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
         const resultsListDiv = document.getElementById('resultsList');
@@ -1979,9 +1983,31 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             saveState();
         });
 
-        clearSearchesBtn.addEventListener('click', () => {
+        // Wipes just this namespace's search history, leaving its current
+        // results untouched - the "x" on the Search History tab.
+        function clearHistoryOnlyForNamespace(nsId) {
+            const state = getNsState(nsId);
+            state.history = [];
+
+            if (nsId === activeNamespace) {
+                renderHistoryFor(nsId);
+            }
+        }
+
+        clearCurrentBtn.addEventListener('click', (e) => {
+            // Lives inside the Current Search tab button itself - stop the
+            // click from also bubbling up into that tab's own switch-to handler.
+            e.stopPropagation();
             if (!activeNamespace) return;
-            clearSearchesForNamespace(activeNamespace);
+            // keepHistory=true: only the current results are cleared here.
+            clearSearchesForNamespace(activeNamespace, true);
+            saveState();
+        });
+
+        clearHistoryBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!activeNamespace) return;
+            clearHistoryOnlyForNamespace(activeNamespace);
             saveState();
         });
 
