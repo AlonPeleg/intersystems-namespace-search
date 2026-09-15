@@ -180,6 +180,23 @@ async function resolveServerConnectionUncached(folderUri: vscode.Uri): Promise<S
         return undefined;
     }
 
+    // Confirmed against three real servers side-by-side, same query/mask,
+    // same underlying files: a server reporting apiVersion=8 (modern IRIS)
+    // returned all 4 matching files, while two independent servers both
+    // reporting apiVersion=3 returned only 1 file and 0 files respectively -
+    // silently, with a clean HTTP 200 and no error. That means action/search
+    // on at least that older Atelier API version can't be trusted to find
+    // every match, and there's no way to distinguish "genuinely 0/partial
+    // matches" from "this server version under-reports" from the response
+    // alone. So below a configurable minimum apiVersion, skip server-side
+    // search for that connection entirely and let it fall back to the local
+    // scan, which reads every file directly and isn't subject to this gap.
+    const minApiVersion = vscode.workspace.getConfiguration('isfsNamespaceSearch').get<number>('serverSideSearchMinApiVersion', 4);
+    if (typeof serverForUri.apiVersion === 'number' && serverForUri.apiVersion < minApiVersion) {
+        log(`  FAILED: server reports Atelier apiVersion=${serverForUri.apiVersion}, below the configured minimum of ${minApiVersion} (isfsNamespaceSearch.serverSideSearchMinApiVersion). Older Atelier search implementations have been observed to silently omit documents that do contain the searched text. Falling back to the local scan for this server so results stay correct. Lower this setting only if you've specifically confirmed server-side search is reliable on this server version.`);
+        return undefined;
+    }
+
     let authHeader: string | undefined;
     if (serverForUri.username && serverForUri.password) {
         authHeader = 'Basic ' + Buffer.from(`${serverForUri.username}:${serverForUri.password}`).toString('base64');
@@ -2171,28 +2188,46 @@ async function resolveSingleMaskFast(
         }
     }
 
-    // A mask with no package qualifier at all (no dots, e.g. "WBLR*") and a
-    // literal prefix has nothing to narrow the search to beyond the root, so
-    // rather than walking the entire namespace tree looking for it, treat it
-    // as a same-level lookup: only the direct children of the namespace root
-    // are checked. Un-packaged classes/routines live directly under the root
-    // in ISFS, so this keeps a broad prefix like "WBLR*" fast instead of
-    // scanning every package.
-    // A mask that does contain a dot (e.g. "Tafnit.App.Something.*") is
-    // resolved to its package folder below and searched recursively from there.
-    // But a mask that STARTS with a wildcard (e.g. "*LRSHOW*") has no literal
+    // Only the mask's own trailing extension dot (".int", ".mac", ".cls", ...)
+    // separates it from any real package path - so the dot-count that
+    // actually matters is on packagePath (the mask with that one extension
+    // segment removed), not on the raw mask itself.
+    const lastDotIndex = cleanMask.lastIndexOf('.');
+    const packagePath = lastDotIndex > 0 ? cleanMask.substring(0, lastDotIndex) : '';
+    const startsWithWildcard = cleanMask.startsWith('*') || cleanMask.startsWith('?');
+
+    // A mask with no real package qualifier - either no dot at all (e.g.
+    // "WBLR*"), or its only dot is the trailing extension separator on an
+    // otherwise flat, un-packaged name (e.g. "WBLRSHOW*.int") - has nothing
+    // to narrow the search to beyond the root, so rather than walking the
+    // entire namespace tree looking for it, treat it as a same-level lookup:
+    // only the direct children of the namespace root are checked.
+    // Routines in particular are commonly flat (one file per name directly
+    // under the root, e.g. "WBLRSHOWFF.int"), unlike classes, which ISFS
+    // nests one folder per package segment - so checking cleanMask.includes('.')
+    // directly (as this used to) misfired on any routine mask with a
+    // wildcard right before its extension: it wrongly treated "WBLRSHOW*" (from
+    // "WBLRSHOW*.int") as a package folder name to look for, found no such
+    // folder at the root (because WBLRSHOWFF.int etc. are files, not
+    // folders), and silently returned zero matches - confirmed live: this is
+    // exactly why the local-scan fallback found "No matching files found"
+    // for a mask/server combination that genuinely had matching files.
+    // A mask whose packagePath itself contains a dot (e.g.
+    // "Tafnit.App.Something.cls" -> packagePath "Tafnit.App.Something") is a
+    // real package path and is resolved to its folder below and searched
+    // recursively from there.
+    // A mask that STARTS with a wildcard (e.g. "*LRSHOW*") has no literal
     // prefix at all to anchor on - the match could be nested inside any
     // package - so it falls through to the full recursive walk below instead
     // of being wrongly restricted to just the root folder.
-    const startsWithWildcard = cleanMask.startsWith('*') || cleanMask.startsWith('?');
-    if (!cleanMask.includes('.') && !startsWithWildcard) {
+    if (!packagePath.includes('.') && !startsWithWildcard) {
         return await collectMatchingFilesShallow(rootFolderUri, rootFolderUri, nameFilterRegex, token, tuning, dirCache);
     }
 
-    const lastDotIndex = cleanMask.lastIndexOf('.');
-    if (lastDotIndex <= 0) {
+    if (!packagePath) {
         // No package path could be derived at all (e.g. a mask starting with
-        // a bare dot) - nothing to narrow the search to.
+        // a bare dot, or a wildcard-prefixed mask with no other dot) -
+        // nothing to narrow the search to.
         return await collectMatchingFiles(rootFolderUri, rootFolderUri, nameFilterRegex, token, tuning, dirCache);
     }
 
@@ -2205,7 +2240,6 @@ async function resolveSingleMaskFast(
     // direct children and checks each for a "UI/bl" subpath, instead of
     // recursively walking the entire Tafnit tree (which is what made a
     // mid-path wildcard so slow before).
-    const packagePath = cleanMask.substring(0, lastDotIndex);
     const segments = buildPathSegmentPlan(packagePath.split('.'));
 
     const candidateFolders = await resolveSegmentedFolders(rootFolderUri, segments, 0, token, tuning, dirCache);

@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.0.10",
+  "version": "1.1.0",
   "publisher": "alonpe",
   "engines": {
     "vscode": "^1.80.0"
@@ -47,6 +47,12 @@
           "type": "boolean",
           "default": true,
           "description": "Search using the IRIS server's own Atelier API search (the same server-side search Studio's Find in Files uses) instead of downloading and scanning every matching file from the extension. Dramatically faster on any real namespace. Requires IRIS/Cache 2017.2+ and reuses the connection already established by 'Edit in Namespace' - if that can't be resolved, or the server doesn't support it, each search automatically falls back to the local scan below without you having to change this setting."
+        },
+        "isfsNamespaceSearch.serverSideSearchMinApiVersion": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "description": "Minimum Atelier apiVersion (as reported by the resolved server connection) required to trust server-side search. Confirmed by side-by-side testing: a server reporting apiVersion 3 can return a clean, error-free response that silently omits documents which do genuinely contain the searched text - Studio-equivalent server-side search on that version cannot be relied on. Any server below this minimum automatically and silently falls back to the local scan for correctness, while servers at or above it keep using the fast server-side search. Lower this only for a specific older server version you've personally confirmed returns complete results."
         },
         "isfsNamespaceSearch.serverSearchMaxResults": {
           "type": "number",
