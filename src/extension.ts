@@ -706,36 +706,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background));
         }
 
-        .tab-btn-temp {
-            max-width: 45%;
-            overflow: hidden;
-        }
-
-        .tab-btn-temp .tab-btn-label {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .tab-close-btn {
-            flex-shrink: 0;
-            font-size: 11px;
-            text-transform: none;
-            letter-spacing: normal;
-            font-weight: normal;
-            opacity: 0.7;
-            padding: 0 2px;
-            border-radius: 2px;
-        }
-
-        .tab-close-btn:hover {
-            opacity: 1;
-            background: var(--vscode-list-hoverBackground);
-        }
-
-        /* Clean Results List - each is a flat, clickable row now; clicking it
-           opens the matches in the temporary results tab rather than
-           expanding in place. */
+        /* Clean Results List - each is a flat, clickable row; clicking it
+           drills into that one file's matches in place (see .detail-view
+           below) instead of expanding inline. */
         .file-group {
             margin-bottom: 2px;
             border-radius: 2px;
@@ -765,10 +738,43 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             background: var(--vscode-list-hoverBackground);
         }
 
-        .temp-tab-header-info {
-            font-size: 11px;
-            color: var(--vscode-descriptionForeground);
-            padding: 2px 6px 8px 6px;
+        /* Drill-down view shown in place of a file list once one of its rows
+           is clicked - just a back button, the file name, and its matches. */
+        .detail-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 4px 8px 4px;
+        }
+
+        .back-btn {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border: none;
+            width: 22px;
+            height: 22px;
+            padding: 0;
+            font-size: 13px;
+            line-height: 1;
+            cursor: pointer;
+            border-radius: 2px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .back-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        .detail-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--vscode-foreground);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .match-item {
@@ -910,16 +916,20 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     <div class="tabs-bar" id="tabsBar">
         <div class="tab-btn active" id="tabBtnCurrent">Current Search</div>
         <div class="tab-btn" id="tabBtnHistory">Search History</div>
-        <div class="tab-btn tab-btn-temp" id="tabBtnTemp" hidden>
-            <span class="tab-btn-label" id="tempTabLabel"></span>
-            <span class="tab-close-btn" id="tempTabCloseBtn" title="Close tab">✕</span>
-        </div>
     </div>
 
     <div id="scrollArea">
-        <div id="results" class="tab-panel active"></div>
+        <div id="results" class="tab-panel active">
+            <div id="resultsList"></div>
+            <div id="resultsDetail" class="detail-view" hidden>
+                <div class="detail-header">
+                    <button type="button" class="back-btn" id="resultsBackBtn" title="Back to results">←</button>
+                    <span class="detail-title" id="resultsDetailTitle"></span>
+                </div>
+                <div id="resultsDetailMatches"></div>
+            </div>
+        </div>
         <div id="historyContainer" class="tab-panel"></div>
-        <div id="tempResults" class="tab-panel"></div>
     </div>
 
     <script>
@@ -937,13 +947,19 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const stopBtn = document.getElementById('stopBtn');
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
+        const resultsListDiv = document.getElementById('resultsList');
+        const resultsDetailDiv = document.getElementById('resultsDetail');
+        const resultsDetailTitle = document.getElementById('resultsDetailTitle');
+        const resultsDetailMatches = document.getElementById('resultsDetailMatches');
+        const resultsBackBtn = document.getElementById('resultsBackBtn');
         const historyContainer = document.getElementById('historyContainer');
-        const tempResultsDiv = document.getElementById('tempResults');
         const tabBtnCurrent = document.getElementById('tabBtnCurrent');
         const tabBtnHistory = document.getElementById('tabBtnHistory');
-        const tabBtnTemp = document.getElementById('tabBtnTemp');
-        const tempTabLabel = document.getElementById('tempTabLabel');
-        const tempTabCloseBtn = document.getElementById('tempTabCloseBtn');
+
+        // "refs" bundle used by showFileDetail/showFileList to know which
+        // list/detail pair to toggle - the Current Search pane has one fixed
+        // set, and each Search History entry gets its own (see buildHistoryTabElement).
+        const resultsRefs = { listEl: resultsListDiv, detailEl: resultsDetailDiv, titleEl: resultsDetailTitle, matchesEl: resultsDetailMatches };
 
         setupNamespacePicker();
         setupTabs();
@@ -969,12 +985,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 searching: false,
                 activeSearchInfo: { query: '', mask: '' },
                 history: [],
-                // Which of the three tabs is showing (current / history / temp),
-                // and the temporary "one file's results" tab's own content, if
-                // a result row has been clicked open. Both are per-namespace so
-                // switching namespace tabs restores what was on screen there.
+                // Which of the two tabs is showing (current / history), and
+                // whether the Current Search pane is drilled into one file's
+                // matches ({fileName, matches}) or showing the full list
+                // (null). Both are per-namespace so switching namespace tabs
+                // restores what was on screen there.
                 activeTab: 'current',
-                tempTab: null
+                resultsDrilldown: null
             };
         }
 
@@ -994,13 +1011,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 queryInput.value = state.query || '';
                 useWildcardsCheckbox.checked = state.useWildcards !== false;
                 restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS);
-                resultsDiv.innerHTML = state.resultsHtml || '';
+                resultsListDiv.innerHTML = state.resultsHtml || '';
                 statusDiv.textContent = state.statusText || 'Ready';
                 renderHistoryFor(activeNamespace);
                 updateSearchButtonsForActiveTab();
                 attachListeners();
-                if (state.tempTab) renderTempResults(state.tempTab.matches);
-                else tempResultsDiv.innerHTML = '';
+                if (state.resultsDrilldown) showFileDetail(resultsRefs, state.resultsDrilldown.fileName, state.resultsDrilldown.matches);
+                else showFileList(resultsRefs);
                 renderActiveTabUI();
             }
             renderNamespacePicker();
@@ -1046,9 +1063,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 activeNamespace = '';
                 searchBtn.disabled = true;
                 queryInput.value = '';
-                resultsDiv.innerHTML = '';
+                resultsListDiv.innerHTML = '';
+                showFileList(resultsRefs);
                 historyContainer.innerHTML = '';
-                tempResultsDiv.innerHTML = '';
                 statusDiv.textContent = 'No ISFS namespace folders open.';
                 renderNamespacePicker();
                 renderActiveTabUI();
@@ -1175,13 +1192,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             queryInput.value = state.query || '';
             useWildcardsCheckbox.checked = state.useWildcards !== false;
             restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS);
-            resultsDiv.innerHTML = state.resultsHtml || '';
+            resultsListDiv.innerHTML = state.resultsHtml || '';
             statusDiv.textContent = state.statusText || 'Ready';
             renderHistoryFor(nsId);
             updateSearchButtonsForActiveTab();
             attachListeners();
-            if (state.tempTab) renderTempResults(state.tempTab.matches);
-            else tempResultsDiv.innerHTML = '';
+            if (state.resultsDrilldown) showFileDetail(resultsRefs, state.resultsDrilldown.fileName, state.resultsDrilldown.matches);
+            else showFileList(resultsRefs);
             renderActiveTabUI();
             renderNamespacePicker();
             saveState();
@@ -1274,13 +1291,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.statusText = 'Preparing search...';
             state.searching = true;
             state.activeSearchInfo = { query, mask: maskList.join(' | ') };
-            // A fresh search invalidates whatever was pinned open in the
-            // temporary results tab, so close it and land back on Current Search.
-            state.tempTab = null;
+            // A fresh search invalidates whatever file was drilled into, so
+            // back out to the full list and land back on Current Search.
+            state.resultsDrilldown = null;
             state.activeTab = 'current';
 
-            resultsDiv.innerHTML = '';
-            tempResultsDiv.innerHTML = '';
+            resultsListDiv.innerHTML = '';
+            showFileList(resultsRefs);
             statusDiv.textContent = state.statusText;
             updateSearchButtonsForActiveTab();
             renderActiveTabUI();
@@ -1298,11 +1315,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.history = [];
             state.statusText = 'Ready';
             state.activeSearchInfo = { query: '', mask: '' };
-            state.tempTab = null;
+            state.resultsDrilldown = null;
             state.activeTab = 'current';
 
-            resultsDiv.innerHTML = '';
-            tempResultsDiv.innerHTML = '';
+            resultsListDiv.innerHTML = '';
+            showFileList(resultsRefs);
             statusDiv.textContent = 'Ready';
             renderHistoryFor(activeNamespace);
             renderActiveTabUI();
@@ -1351,7 +1368,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     const el = buildFileMatchesElement(msg.fileName, msg.uri, msg.matches);
                     state.resultsHtml += el.outerHTML;
                     state.matchCount += msg.matches.length;
-                    if (isActive) resultsDiv.appendChild(el);
+                    if (isActive) resultsListDiv.appendChild(el);
                     saveState();
                     break;
                 }
@@ -1450,8 +1467,48 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'history-content';
-            contentDiv.innerHTML = entry.resultsHtml;
-            attachFileGroupListeners(contentDiv);
+
+            // Each history entry gets its own independent list/detail pair
+            // (unlike Current Search, this doesn't need to be persisted -
+            // reopening the sidebar just shows the full list again).
+            const entryListDiv = document.createElement('div');
+            entryListDiv.innerHTML = entry.resultsHtml;
+
+            const entryDetailDiv = document.createElement('div');
+            entryDetailDiv.className = 'detail-view';
+            entryDetailDiv.hidden = true;
+
+            const entryDetailHeader = document.createElement('div');
+            entryDetailHeader.className = 'detail-header';
+
+            const entryBackBtn = document.createElement('button');
+            entryBackBtn.type = 'button';
+            entryBackBtn.className = 'back-btn';
+            entryBackBtn.title = 'Back to results';
+            entryBackBtn.textContent = '←';
+
+            const entryDetailTitle = document.createElement('span');
+            entryDetailTitle.className = 'detail-title';
+
+            entryDetailHeader.appendChild(entryBackBtn);
+            entryDetailHeader.appendChild(entryDetailTitle);
+
+            const entryDetailMatches = document.createElement('div');
+
+            entryDetailDiv.appendChild(entryDetailHeader);
+            entryDetailDiv.appendChild(entryDetailMatches);
+
+            const entryRefs = { listEl: entryListDiv, detailEl: entryDetailDiv, titleEl: entryDetailTitle, matchesEl: entryDetailMatches };
+
+            entryBackBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showFileList(entryRefs);
+            });
+
+            attachFileGroupListeners(entryListDiv, entryRefs);
+
+            contentDiv.appendChild(entryListDiv);
+            contentDiv.appendChild(entryDetailDiv);
 
             details.appendChild(summary);
             details.appendChild(contentDiv);
@@ -1460,10 +1517,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
 
         // Builds one flat, clickable row per file (e.g. "Offer.cls (2)").
-        // The individual matches aren't rendered inline any more - they're
-        // stashed on the row as JSON (so it survives being serialized back
-        // out via outerHTML/innerHTML for history/state) and only rendered
-        // into the temporary results tab when the row itself is clicked.
+        // The individual matches aren't rendered inline - they're stashed on
+        // the row as JSON (so they survive being serialized back out via
+        // outerHTML/innerHTML for history/state) and only rendered into the
+        // list's own detail view when the row itself is clicked.
         function buildFileMatchesElement(fileName, uri, matches) {
             const group = document.createElement('div');
             group.className = 'file-group';
@@ -1475,84 +1532,46 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             header.textContent = fileName + ' (' + matches.length + ')';
             group.appendChild(header);
 
-            group.addEventListener('click', () => openTempTab(fileName, matches));
+            group.addEventListener('click', () => {
+                if (activeNamespace) {
+                    getNsState(activeNamespace).resultsDrilldown = { fileName, matches };
+                    saveState();
+                }
+                showFileDetail(resultsRefs, fileName, matches);
+            });
 
             return group;
         }
 
-        // Re-wires the click-to-open-temp-tab handler on every file-group row
+        // Re-wires the click-to-drill-down handler on every file-group row
         // inside a container after that container's markup was restored from
         // a raw HTML string (innerHTML restores markup but not listeners) -
-        // used for the "Current Search" pane on reload/namespace-switch and
-        // for each Search History entry when it's built.
-        function attachFileGroupListeners(container) {
+        // used for the Current Search list on reload/namespace-switch and for
+        // each Search History entry's own list when it's built.
+        function attachFileGroupListeners(container, refs) {
             container.querySelectorAll('.file-group').forEach(group => {
                 group.addEventListener('click', () => {
                     const fileName = group.getAttribute('data-filename') || '';
                     let matches = [];
                     try { matches = JSON.parse(group.getAttribute('data-matches') || '[]'); } catch {}
-                    openTempTab(fileName, matches);
+                    if (refs === resultsRefs && activeNamespace) {
+                        getNsState(activeNamespace).resultsDrilldown = { fileName, matches };
+                        saveState();
+                    }
+                    showFileDetail(refs, fileName, matches);
                 });
             });
         }
 
         function attachListeners() {
-            attachFileGroupListeners(resultsDiv);
+            attachFileGroupListeners(resultsListDiv, resultsRefs);
         }
 
-        // --- Tabs: Current Search / Search History / temporary per-file results ---
-
-        function setupTabs() {
-            tabBtnCurrent.addEventListener('click', () => switchToTab('current'));
-            tabBtnHistory.addEventListener('click', () => switchToTab('history'));
-            tabBtnTemp.addEventListener('click', (e) => {
-                if (e.target === tempTabCloseBtn) {
-                    closeTempTab();
-                } else {
-                    switchToTab('temp');
-                }
-            });
-        }
-
-        function switchToTab(tabName) {
-            if (!activeNamespace) return;
-            const state = getNsState(activeNamespace);
-            if (tabName === 'temp' && !state.tempTab) return;
-            state.activeTab = tabName;
-            renderActiveTabUI();
-            saveState();
-        }
-
-        // Opens (or replaces) the single temporary tab with one file's
-        // matches. There's only ever one temp tab - clicking a different
-        // result row while it's open just swaps its contents.
-        function openTempTab(fileName, matches) {
-            if (!activeNamespace) return;
-            const state = getNsState(activeNamespace);
-            state.tempTab = { label: fileName + ' (' + matches.length + ')', matches };
-            state.activeTab = 'temp';
-            renderTempResults(matches);
-            renderActiveTabUI();
-            saveState();
-        }
-
-        function closeTempTab() {
-            if (!activeNamespace) return;
-            const state = getNsState(activeNamespace);
-            state.tempTab = null;
-            if (state.activeTab === 'temp') state.activeTab = 'current';
-            tempResultsDiv.innerHTML = '';
-            renderActiveTabUI();
-            saveState();
-        }
-
-        function renderTempResults(matches) {
-            tempResultsDiv.innerHTML = '';
-            const info = document.createElement('div');
-            info.className = 'temp-tab-header-info';
-            info.textContent = matches.length + ' match' + (matches.length === 1 ? '' : 'es');
-            tempResultsDiv.appendChild(info);
-
+        // Swaps a list/detail pair (see resultsRefs / entryRefs) to show just
+        // one file's matches, with a back button to return to the full list.
+        function showFileDetail(refs, fileName, matches) {
+            refs.titleEl.textContent = fileName + ' (' + matches.length + ')';
+            refs.matchesEl.innerHTML = '';
             matches.forEach(m => {
                 const item = document.createElement('div');
                 item.className = 'match-item';
@@ -1560,29 +1579,51 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 item.addEventListener('click', () => {
                     vscode.postMessage({ type: 'openMatch', uri: m.uri, line: m.line, column: m.column });
                 });
-                tempResultsDiv.appendChild(item);
+                refs.matchesEl.appendChild(item);
             });
+            refs.listEl.hidden = true;
+            refs.detailEl.hidden = false;
+        }
+
+        function showFileList(refs) {
+            refs.detailEl.hidden = true;
+            refs.listEl.hidden = false;
+        }
+
+        resultsBackBtn.addEventListener('click', () => {
+            showFileList(resultsRefs);
+            if (activeNamespace) {
+                getNsState(activeNamespace).resultsDrilldown = null;
+                saveState();
+            }
+        });
+
+        // --- Tabs: Current Search / Search History ---
+
+        function setupTabs() {
+            tabBtnCurrent.addEventListener('click', () => switchToTab('current'));
+            tabBtnHistory.addEventListener('click', () => switchToTab('history'));
+        }
+
+        function switchToTab(tabName) {
+            if (!activeNamespace) return;
+            const state = getNsState(activeNamespace);
+            state.activeTab = tabName;
+            renderActiveTabUI();
+            saveState();
         }
 
         // Reflects the active namespace's chosen tab into the tab bar and
-        // which of the three panels in #scrollArea is visible.
+        // which of the two panels in #scrollArea is visible.
         function renderActiveTabUI() {
             const state = activeNamespace ? getNsState(activeNamespace) : null;
             const activeTab = state ? (state.activeTab || 'current') : 'current';
-            const hasTempTab = !!(state && state.tempTab);
 
-            tabBtnTemp.hidden = !hasTempTab;
-            if (hasTempTab) tempTabLabel.textContent = state.tempTab.label;
+            tabBtnCurrent.classList.toggle('active', activeTab === 'current');
+            tabBtnHistory.classList.toggle('active', activeTab === 'history');
 
-            const effectiveTab = (activeTab === 'temp' && !hasTempTab) ? 'current' : activeTab;
-
-            tabBtnCurrent.classList.toggle('active', effectiveTab === 'current');
-            tabBtnHistory.classList.toggle('active', effectiveTab === 'history');
-            tabBtnTemp.classList.toggle('active', effectiveTab === 'temp');
-
-            resultsDiv.classList.toggle('active', effectiveTab === 'current');
-            historyContainer.classList.toggle('active', effectiveTab === 'history');
-            tempResultsDiv.classList.toggle('active', effectiveTab === 'temp');
+            resultsDiv.classList.toggle('active', activeTab === 'current');
+            historyContainer.classList.toggle('active', activeTab === 'history');
         }
 
         function escapeHtml(text) {
