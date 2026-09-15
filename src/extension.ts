@@ -1937,11 +1937,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         // history (but leaves the search text and file mask alone) - shared
         // by the small "x" in the tab bar and by "Clear All" below, which
         // layers the text/mask reset on top of this.
-        function clearSearchesForNamespace(nsId) {
+        function clearSearchesForNamespace(nsId, keepHistory) {
             const state = getNsState(nsId);
             state.resultsHtml = '';
             state.matchCount = 0;
-            state.history = [];
+            if (!keepHistory) state.history = [];
             state.statusText = 'Ready';
             state.activeSearchInfo = { query: '', mask: '' };
             state.resultsDrilldown = null;
@@ -1951,19 +1951,20 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 resultsListDiv.innerHTML = '';
                 showFileList(resultsRefs);
                 statusDiv.textContent = 'Ready';
-                renderHistoryFor(nsId);
+                if (!keepHistory) renderHistoryFor(nsId);
                 renderActiveTabUI();
             }
         }
 
         clearBtn.addEventListener('click', () => {
-            // "Clear All" resets everything for the active namespace only -
-            // the search text, every file mask row, and both the current
-            // results and the search history - back to a blank slate.
+            // "Clear All" resets the search text, every file mask row, and
+            // the current results for the active namespace - but leaves the
+            // search history alone (keepHistory=true), since that's only
+            // ever cleared by the dedicated icon near the tabs.
             if (!activeNamespace) return;
             queryInput.value = '';
             restoreMaskInputs(['']);
-            clearSearchesForNamespace(activeNamespace);
+            clearSearchesForNamespace(activeNamespace, true);
             saveState();
         });
 
