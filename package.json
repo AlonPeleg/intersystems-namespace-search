@@ -1,8 +1,8 @@
 {
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
-  "description": "Background concurrent ISFS search with optimized direct path target resolution.",
-  "version": "1.0.7",
+  "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
+  "version": "1.0.8",
   "publisher": "alonpe",
   "engines": {
     "vscode": "^1.80.0"
@@ -43,23 +43,39 @@
     "configuration": {
       "title": "ISFS Namespace Search",
       "properties": {
+        "isfsNamespaceSearch.useServerSideSearch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Search using the IRIS server's own Atelier API search (the same server-side search Studio's Find in Files uses) instead of downloading and scanning every matching file from the extension. Dramatically faster on any real namespace. Requires IRIS/Cache 2017.2+ and reuses the connection already established by 'Edit in Namespace' - if that can't be resolved, or the server doesn't support it, each search automatically falls back to the local scan below without you having to change this setting."
+        },
+        "isfsNamespaceSearch.serverSearchMaxResults": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 1,
+          "description": "Maximum matches requested per server-side search. The Atelier API's own default is only 200, which can silently truncate a broad search - this raises that ceiling. Only applies when isfsNamespaceSearch.useServerSideSearch is on."
+        },
+        "isfsNamespaceSearch.allowSelfSignedCert": {
+          "type": "boolean",
+          "default": false,
+          "description": "Accept self-signed/untrusted TLS certificates when this extension talks directly to the server for server-side search. Only enable this for a trusted development server you know uses a self-signed HTTPS certificate."
+        },
         "isfsNamespaceSearch.dirConcurrency": {
           "type": "number",
           "default": 6,
           "minimum": 1,
-          "description": "How many ISFS directory listings run in parallel while resolving a package path. Higher is faster for wide packages but puts more concurrent load on the IRIS server. Was fixed at 2; raise or lower to match your server."
+          "description": "Local-scan fallback only. How many ISFS directory listings run in parallel while resolving a package path. Higher is faster for wide packages but puts more concurrent load on the IRIS server. Was fixed at 2; raise or lower to match your server."
         },
         "isfsNamespaceSearch.fileConcurrency": {
           "type": "number",
           "default": 8,
           "minimum": 1,
-          "description": "How many files are read and scanned in parallel once the target file list is resolved. Higher is faster for searches over many files but puts more concurrent load on the IRIS server. Was fixed at 2; raise or lower to match your server."
+          "description": "Local-scan fallback only. How many files are read and scanned in parallel once the target file list is resolved. Higher is faster for searches over many files but puts more concurrent load on the IRIS server. Was fixed at 2; raise or lower to match your server."
         },
         "isfsNamespaceSearch.pauseBetweenReadsMs": {
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "description": "Artificial delay (ms) inserted before every ISFS read/list call, on top of the concurrency limits above. Was fixed at 15ms for every single read, which added up to real seconds on searches touching many files or folders. Defaults to 0 (rely on the concurrency settings alone); raise it only if your IRIS server needs a gentler pace."
+          "description": "Local-scan fallback only. Artificial delay (ms) inserted before every ISFS read/list call, on top of the concurrency limits above. Defaults to 0; raise it only if your IRIS server needs a gentler pace."
         }
       }
     }

@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as http from 'http';
+import * as https from 'https';
 
 interface MatchResult {
     fileName: string;
@@ -63,6 +65,313 @@ async function readDirCached(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Server-side search (Atelier "action/search")
+//
+// Studio's Find in Files is fast because it runs entirely inside the IRIS
+// process, iterating the class/routine storage where it already lives - no
+// per-file network fetch. That same server-side search is reachable remotely
+// via the Atelier REST API (IRIS/Cache 2017.2+): a single
+//   GET /api/atelier/v2/{namespace}/action/search?query=...&documents=...
+// does the whole namespace-wide search in one round trip and hands back
+// matches as JSON, instead of this extension listing every folder and
+// downloading every candidate file to grep locally (see
+// executeThrottledSearch's fallback path below, which is what runs when any
+// part of this isn't available).
+//
+// vscode.workspace.fs has no hook for a custom server action like this, so
+// it's called directly over HTTP here, reusing the connection the user
+// already established by opening the namespace via the InterSystems
+// extension's "Edit in Namespace" - not a separate, newly-entered one.
+// ---------------------------------------------------------------------------
+
+interface ServerConnectionInfo {
+    scheme: 'http' | 'https';
+    host: string;
+    port: number;
+    pathPrefix: string;
+    ns: string;
+    authHeader: string;
+}
+
+// Resolved connections are cached per namespace folder for the life of the
+// extension host, since re-resolving on every keystroke/search would add
+// back exactly the kind of overhead this whole feature exists to remove.
+// Cleared whenever the InterSystems extension reports the underlying
+// connection changed (see activate()).
+const connectionCache = new Map<string, ServerConnectionInfo | undefined>();
+
+// isfs(-readonly) workspace folders are addressed as isfs://<serverName>:<namespace>/...
+function parseIsfsAuthority(uri: vscode.Uri): { serverName: string; ns: string } | undefined {
+    const authority = uri.authority || '';
+    const sep = authority.indexOf(':');
+    if (sep <= 0) return undefined;
+    const serverName = decodeURIComponent(authority.substring(0, sep));
+    const ns = decodeURIComponent(authority.substring(sep + 1));
+    if (!serverName || !ns) return undefined;
+    return { serverName, ns };
+}
+
+async function activateExtensionExports(extensionId: string): Promise<any | undefined> {
+    const ext = vscode.extensions.getExtension(extensionId);
+    if (!ext) return undefined;
+    try {
+        return ext.isActive ? ext.exports : await ext.activate();
+    } catch {
+        return undefined;
+    }
+}
+
+// Reuses the InterSystems ObjectScript extension's already-authenticated
+// connection for this namespace folder (via its exported serverForUri/
+// asyncServerForUri API) for credentials, and the Server Manager extension's
+// getServerSpec for host/port/scheme - rather than asking the user to
+// configure a server connection a second time for this extension. Returns
+// undefined for anything this can't resolve (extension missing, connection
+// not yet established, unexpected API shape, ...); callers treat that as
+// "fall back to the local file-by-file scan," never as a hard error.
+async function resolveServerConnectionUncached(folderUri: vscode.Uri): Promise<ServerConnectionInfo | undefined> {
+    const parsed = parseIsfsAuthority(folderUri);
+    if (!parsed) return undefined;
+
+    const objectScriptApi = await activateExtensionExports('intersystems-community.vscode-objectscript');
+    if (!objectScriptApi) return undefined;
+
+    let serverForUri: any;
+    try {
+        serverForUri = objectScriptApi.asyncServerForUri
+            ? await objectScriptApi.asyncServerForUri(folderUri)
+            : objectScriptApi.serverForUri?.(folderUri);
+    } catch {
+        return undefined;
+    }
+    const authHeader: string | undefined = serverForUri?.auth?.httpAuthorizationHeader;
+    if (!authHeader) return undefined;
+
+    const serverManagerApi = await activateExtensionExports('intersystems-community.servermanager');
+    if (!serverManagerApi?.getServerSpec) return undefined;
+
+    let spec: any;
+    try {
+        spec = await serverManagerApi.getServerSpec(serverForUri.serverName || parsed.serverName);
+    } catch {
+        return undefined;
+    }
+    const webServer = spec?.webServer;
+    if (!webServer?.host || !webServer?.port) return undefined;
+
+    let pathPrefix: string = webServer.pathPrefix || '';
+    if (pathPrefix.length && !pathPrefix.startsWith('/')) pathPrefix = '/' + pathPrefix;
+
+    return {
+        scheme: webServer.scheme === 'http' ? 'http' : 'https',
+        host: webServer.host,
+        port: webServer.port,
+        pathPrefix,
+        ns: parsed.ns,
+        authHeader
+    };
+}
+
+async function resolveServerConnection(folderUri: vscode.Uri): Promise<ServerConnectionInfo | undefined> {
+    const key = folderUri.toString();
+    if (connectionCache.has(key)) return connectionCache.get(key);
+    const resolved = await resolveServerConnectionUncached(folderUri);
+    connectionCache.set(key, resolved);
+    return resolved;
+}
+
+// Shared by both search paths so a query behaves identically whether it's
+// answered by the server or by the local fallback scan.
+function buildQueryRegexSource(query: string, useWildcards: boolean): string {
+    return useWildcards
+        ? query
+            .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '.*')
+            .replace(/\?/g, '.')
+        : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// The Atelier search result gives a document's dotted server-side name
+// (e.g. "Tafnit.App.Portfolio.Offer.cls") rather than a file path; ISFS maps
+// package structure to folder structure, so everything but the final
+// extension becomes a path segment.
+function docNameToRelativePath(docName: string): string {
+    const lastDot = docName.lastIndexOf('.');
+    if (lastDot <= 0) return docName;
+    const ext = docName.substring(lastDot);
+    const namePart = docName.substring(0, lastDot);
+    return namePart.replace(/\./g, '/') + ext;
+}
+
+function httpGetJson(
+    urlString: string,
+    headers: Record<string, string>,
+    allowSelfSigned: boolean,
+    token: vscode.CancellationToken
+): Promise<any> {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let parsedUrl: URL;
+        try {
+            parsedUrl = new URL(urlString);
+        } catch (e: any) {
+            reject(e);
+            return;
+        }
+
+        const lib = parsedUrl.protocol === 'http:' ? http : https;
+        const options: any = { headers };
+        if (lib === https && allowSelfSigned) options.rejectUnauthorized = false;
+
+        const req = lib.get(parsedUrl, options, (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk) => chunks.push(chunk as Buffer));
+            res.on('end', () => {
+                if (settled) return;
+                settled = true;
+                const body = Buffer.concat(chunks).toString('utf8');
+                const status = res.statusCode || 0;
+                if (status < 200 || status >= 300) {
+                    reject(new Error(`HTTP ${status}: ${body.slice(0, 300)}`));
+                    return;
+                }
+                try {
+                    resolve(body ? JSON.parse(body) : {});
+                } catch (e: any) {
+                    reject(new Error(`Invalid JSON response: ${e.message}`));
+                }
+            });
+        });
+
+        req.on('error', (err) => {
+            if (settled) return;
+            settled = true;
+            reject(err);
+        });
+
+        const cancelListener = token.onCancellationRequested(() => {
+            if (settled) return;
+            settled = true;
+            req.destroy();
+            reject(new Error('Search cancelled'));
+        });
+        req.on('close', () => cancelListener.dispose());
+    });
+}
+
+interface ServerSearchGroup {
+    fileName: string;
+    uri: vscode.Uri;
+    matches: MatchResult[];
+}
+
+// Runs the whole namespace search as one HTTP request. `masks` are passed
+// straight through as the API's "documents" mask list (the same comma-
+// separated, wildcarded, dot-package syntax already typed into the File
+// Mask / Package field - Atelier understands it natively, so there's no
+// client-side path-resolution step to do here at all).
+async function runServerSideSearch(
+    rootFolderUri: vscode.Uri,
+    connection: ServerConnectionInfo,
+    masks: string[],
+    query: string,
+    useWildcards: boolean,
+    max: number,
+    allowSelfSigned: boolean,
+    token: vscode.CancellationToken
+): Promise<ServerSearchGroup[]> {
+    const documents = masks.map(m => m.trim()).filter(Boolean).join(',');
+    if (!documents) return [];
+
+    const patternSource = buildQueryRegexSource(query, useWildcards);
+    // This extension's search has always been case-insensitive (see the 'gi'
+    // flag in the local fallback below) - (?i) keeps server-side results
+    // consistent with that instead of silently becoming case-sensitive.
+    const regexQuery = `(?i)${patternSource}`;
+
+    const params = new URLSearchParams({
+        query: regexQuery,
+        documents,
+        regex: '1',
+        sys: '0',
+        gen: '0',
+        max: String(max)
+    });
+
+    const url = `${connection.scheme}://${connection.host}:${connection.port}${connection.pathPrefix}/api/atelier/v2/${encodeURIComponent(connection.ns)}/action/search?${params.toString()}`;
+
+    const json = await httpGetJson(url, { Authorization: connection.authHeader, Accept: 'application/json' }, allowSelfSigned, token);
+
+    const errors = json?.status?.errors;
+    if (Array.isArray(errors) && errors.length) {
+        throw new Error(errors.map((e: any) => e?.error || e?.message || String(e)).join('; '));
+    }
+
+    const rawResults: any[] = json?.result?.content ?? json?.result ?? [];
+    if (!Array.isArray(rawResults)) {
+        throw new Error('Unexpected response shape from action/search');
+    }
+
+    const groups: ServerSearchGroup[] = [];
+    // Re-run the same pattern against just the handful of lines the server
+    // already told us matched, purely to recover a column offset (and split
+    // out every occurrence on a line) - the search API reports which lines
+    // matched, not where on them. This is local string work over a few dozen
+    // short strings, not a new round trip, so it doesn't reintroduce the cost
+    // this feature is meant to remove.
+    const lineRegex = new RegExp(patternSource, 'gi');
+
+    for (const docResult of rawResults) {
+        const docName: string | undefined = docResult?.doc ?? docResult?.document ?? docResult?.name;
+        const rawMatches: any[] = docResult?.matches ?? docResult?.result ?? [];
+        if (!docName || !Array.isArray(rawMatches) || rawMatches.length === 0) continue;
+
+        const relativePath = docNameToRelativePath(docName);
+        const fileUri = vscode.Uri.joinPath(rootFolderUri, relativePath);
+        const fileName = relativePath.split('/').pop() || docName;
+
+        const matches: MatchResult[] = [];
+        for (const m of rawMatches) {
+            const rawLine = m?.line ?? m?.linenumber ?? m?.lineNumber;
+            const text: string = typeof m?.text === 'string' ? m.text : (typeof m?.content === 'string' ? m.content : '');
+            if (typeof rawLine !== 'number') continue;
+            // The API appears to number lines from 1; this extension's own
+            // Position/line handling elsewhere is 0-based.
+            const lineIdx = rawLine > 0 ? rawLine - 1 : rawLine;
+
+            lineRegex.lastIndex = 0;
+            let foundOnLine = false;
+            let exec: RegExpExecArray | null;
+            while ((exec = lineRegex.exec(text)) !== null) {
+                foundOnLine = true;
+                matches.push({ fileName, line: lineIdx, column: exec.index, lineText: text.trim(), uri: fileUri.toString() });
+                if (exec.index === lineRegex.lastIndex) lineRegex.lastIndex++;
+            }
+            if (!foundOnLine) {
+                // Couldn't re-locate the match in the returned text (e.g. it
+                // only held the matched fragment, not the whole line) - still
+                // surface it rather than silently dropping a real match.
+                matches.push({ fileName, line: lineIdx, column: 0, lineText: text.trim(), uri: fileUri.toString() });
+            }
+        }
+
+        if (matches.length) groups.push({ fileName, uri: fileUri, matches });
+    }
+
+    // The server sent back document entries but none of them normalized into
+    // a usable group - almost certainly means the field names guessed above
+    // (doc/document/name, matches/result, line/text) don't match what this
+    // particular server version actually returns, not that there are
+    // genuinely zero matches. Treat that as a failure so the caller falls
+    // back to the local scan instead of reporting a false "0 matches found."
+    if (rawResults.length > 0 && groups.length === 0) {
+        throw new Error('Response received but its shape was not recognized');
+    }
+
+    return groups;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     const provider = new ISFSSearchWebviewProvider(context.extensionUri);
 
@@ -73,6 +382,16 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // The cached connection info (credentials included) is only valid until
+    // the InterSystems extension's own connection state changes - e.g. the
+    // user reconnects or edits server settings - so drop it then rather than
+    // risk searching with stale credentials until the extension host restarts.
+    activateExtensionExports('intersystems-community.vscode-objectscript').then((api) => {
+        if (api?.onDidChangeConnection) {
+            context.subscriptions.push(api.onDidChangeConnection(() => connectionCache.clear()));
+        }
+    });
 }
 
 export function deactivate() {}
@@ -210,15 +529,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         // it's matched literally. With wildcards off, '*' and '?' are escaped
         // too, so code containing a literal '*' (e.g. $P(test,"*",1)) can
         // still be searched for as-is.
-        const searchRegex = useWildcards
-            ? new RegExp(
-                query
-                    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-                    .replace(/\*/g, '.*')
-                    .replace(/\?/g, '.'),
-                'gi'
-            )
-            : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        const patternSource = buildQueryRegexSource(query, useWildcards);
+        const searchRegex = new RegExp(patternSource, 'gi');
 
         this._view.webview.postMessage({
             type: 'searchStarted',
@@ -226,6 +538,21 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             query,
             mask: masks.join(',')
         });
+
+        const cfg = vscode.workspace.getConfiguration('isfsNamespaceSearch');
+        const useServerSide = cfg.get('useServerSideSearch') !== false;
+
+        if (useServerSide) {
+            const ranServerSide = await this.tryServerSideSearch(folder.uri, masks, query, useWildcards, namespaceId, source);
+            if (ranServerSide) return;
+            // tryServerSideSearch already posted a statusUpdate explaining why
+            // it's falling back, unless the search was cancelled meanwhile.
+            if (token.isCancellationRequested) {
+                this._view.webview.postMessage({ type: 'searchStopped', namespaceId, message: 'Search cancelled.' });
+                this.forgetSearchIfCurrent(namespaceId, source);
+                return;
+            }
+        }
 
         const tuning = getSearchTuning();
         const dirCache: DirCache = new Map();
@@ -346,6 +673,88 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         } finally {
             this.forgetSearchIfCurrent(namespaceId, source);
         }
+    }
+
+    // Attempts the whole search as one server-side Atelier action/search
+    // request. Returns true if it fully handled the search (posted
+    // searchCompleted, cleaned up the token source) - the caller should just
+    // return in that case. Returns false if the caller should fall back to
+    // the local file-by-file scan, having already posted a statusUpdate
+    // explaining why (unless the search was cancelled, which the caller
+    // checks for itself).
+    private async tryServerSideSearch(
+        folderUri: vscode.Uri,
+        masks: string[],
+        query: string,
+        useWildcards: boolean,
+        namespaceId: string,
+        source: vscode.CancellationTokenSource
+    ): Promise<boolean> {
+        if (!this._view) return false;
+        const token = source.token;
+
+        let connection: ServerConnectionInfo | undefined;
+        try {
+            connection = await resolveServerConnection(folderUri);
+        } catch {
+            connection = undefined;
+        }
+
+        if (token.isCancellationRequested) return false;
+
+        if (!connection) {
+            this._view.webview.postMessage({
+                type: 'statusUpdate',
+                namespaceId,
+                message: 'Server-side search unavailable for this namespace - scanning files locally instead...'
+            });
+            return false;
+        }
+
+        this._view.webview.postMessage({ type: 'statusUpdate', namespaceId, message: 'Searching on the server...' });
+
+        const cfg = vscode.workspace.getConfiguration('isfsNamespaceSearch');
+        const allowSelfSigned = cfg.get('allowSelfSignedCert') === true;
+        const configuredMax = cfg.get('serverSearchMaxResults');
+        const maxResults = typeof configuredMax === 'number' && Number.isFinite(configuredMax) && configuredMax > 0
+            ? Math.floor(configuredMax)
+            : 5000;
+
+        let groups: ServerSearchGroup[];
+        try {
+            groups = await runServerSideSearch(folderUri, connection, masks, query, useWildcards, maxResults, allowSelfSigned, token);
+        } catch (err: any) {
+            if (token.isCancellationRequested) return false;
+            this._view.webview.postMessage({
+                type: 'statusUpdate',
+                namespaceId,
+                message: `Server-side search failed (${err?.message || err}) - scanning files locally instead...`
+            });
+            return false;
+        }
+
+        if (token.isCancellationRequested) return false;
+
+        let totalMatches = 0;
+        for (const group of groups) {
+            totalMatches += group.matches.length;
+            this._view.webview.postMessage({
+                type: 'addMatches',
+                namespaceId,
+                fileName: group.fileName,
+                uri: group.uri.toString(),
+                matches: group.matches
+            });
+        }
+
+        this._view.webview.postMessage({
+            type: 'searchCompleted',
+            namespaceId,
+            message: `Complete (server-side search). Found ${totalMatches} match(es) across ${groups.length} file(s).`,
+            totalMatches
+        });
+        this.forgetSearchIfCurrent(namespaceId, source);
+        return true;
     }
 
     // Only clears the map entry if it still points at *this* run's token
