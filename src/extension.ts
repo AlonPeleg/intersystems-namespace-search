@@ -994,6 +994,74 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             border-color: var(--vscode-focusBorder);
         }
 
+        /* Small inline "x" sitting inside the Search Text box itself, so
+           clearing just the query doesn't require touching the mask or
+           results/history. */
+        .input-with-clear {
+            position: relative;
+        }
+
+        .input-with-clear input[type="text"] {
+            padding-right: 24px;
+        }
+
+        .inline-clear-btn {
+            position: absolute;
+            top: 50%;
+            right: 3px;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            font-size: 12px;
+            line-height: 1;
+            border-radius: 2px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .inline-clear-btn:hover {
+            color: var(--vscode-errorForeground);
+            background: var(--vscode-list-hoverBackground);
+        }
+
+        /* A label with its own small "clear" action to the right of it -
+           used above the file mask rows so clearing the mask doesn't
+           require a full "Clear All". */
+        .label-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .label-row label {
+            margin-bottom: 0;
+        }
+
+        .label-clear-btn {
+            background: none;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            padding: 2px 4px;
+            font-size: 11px;
+            line-height: 1;
+            border-radius: 2px;
+            text-transform: none;
+            letter-spacing: normal;
+        }
+
+        .label-clear-btn:hover {
+            color: var(--vscode-errorForeground);
+            background: var(--vscode-list-hoverBackground);
+        }
+
         /* Namespace picker: a compact dropdown button, better suited to a
            narrow sidebar than a row of tabs that needs horizontal scrolling.
            Each namespace still keeps its own independent search state (see
@@ -1230,6 +1298,29 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background));
         }
 
+        /* Pushes the "clear searches" icon to the far right of the tab bar,
+           past both tab labels. */
+        .tabs-bar-spacer {
+            flex: 1;
+        }
+
+        .tab-clear-all-btn {
+            align-self: center;
+            background: none;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            padding: 3px 6px;
+            font-size: 12px;
+            line-height: 1;
+            border-radius: 2px;
+        }
+
+        .tab-clear-all-btn:hover {
+            color: var(--vscode-errorForeground);
+            background: var(--vscode-list-hoverBackground);
+        }
+
         /* Clean Results List - each is a flat, clickable row; clicking it
            drills into that one file's matches in place (see .detail-view
            below) instead of expanding inline. */
@@ -1412,14 +1503,20 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         </div>
         <div class="input-group">
             <label>Search Text</label>
-            <input type="text" id="query" placeholder="Search term..." />
+            <div class="input-with-clear">
+                <input type="text" id="query" placeholder="Search term..." />
+                <button type="button" class="inline-clear-btn" id="clearQueryBtn" title="Clear search text">✕</button>
+            </div>
             <label class="checkbox-row">
                 <input type="checkbox" id="useWildcardsCheckbox" checked />
                 <span>Use wildcards (<code>*</code> = any characters, <code>?</code> = one character). Turn off to search for a literal <code>*</code> or <code>?</code>.</span>
             </label>
         </div>
         <div class="input-group">
-            <label>File Mask / Package</label>
+            <div class="label-row">
+                <label>File Mask / Package</label>
+                <button type="button" class="label-clear-btn" id="clearMasksBtn" title="Clear file mask">✕</button>
+            </div>
             <div id="masksContainer">
                 <div class="mask-row">
                     <input type="text" class="mask-input" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio*.cls" />
@@ -1440,6 +1537,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     <div class="tabs-bar" id="tabsBar">
         <div class="tab-btn active" id="tabBtnCurrent">Current Search</div>
         <div class="tab-btn" id="tabBtnHistory">Search History</div>
+        <div class="tabs-bar-spacer"></div>
+        <button type="button" class="tab-clear-all-btn" id="clearSearchesBtn" title="Clear current results and search history">✕</button>
     </div>
 
     <div id="scrollArea">
@@ -1469,6 +1568,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const searchBtn = document.getElementById('searchBtn');
         const clearBtn = document.getElementById('clearBtn');
         const stopBtn = document.getElementById('stopBtn');
+        const clearQueryBtn = document.getElementById('clearQueryBtn');
+        const clearMasksBtn = document.getElementById('clearMasksBtn');
+        const clearSearchesBtn = document.getElementById('clearSearchesBtn');
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
         const resultsListDiv = document.getElementById('resultsList');
@@ -1831,9 +1933,12 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'startSearch', query, masks: maskList, namespaceId: nsId, useWildcards });
         });
 
-        clearBtn.addEventListener('click', () => {
-            if (!activeNamespace) return;
-            const state = getNsState(activeNamespace);
+        // Wipes this namespace's current results and its whole search
+        // history (but leaves the search text and file mask alone) - shared
+        // by the small "x" in the tab bar and by "Clear All" below, which
+        // layers the text/mask reset on top of this.
+        function clearSearchesForNamespace(nsId) {
+            const state = getNsState(nsId);
             state.resultsHtml = '';
             state.matchCount = 0;
             state.history = [];
@@ -1842,11 +1947,40 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.resultsDrilldown = null;
             state.activeTab = 'current';
 
-            resultsListDiv.innerHTML = '';
-            showFileList(resultsRefs);
-            statusDiv.textContent = 'Ready';
-            renderHistoryFor(activeNamespace);
-            renderActiveTabUI();
+            if (nsId === activeNamespace) {
+                resultsListDiv.innerHTML = '';
+                showFileList(resultsRefs);
+                statusDiv.textContent = 'Ready';
+                renderHistoryFor(nsId);
+                renderActiveTabUI();
+            }
+        }
+
+        clearBtn.addEventListener('click', () => {
+            // "Clear All" resets everything for the active namespace only -
+            // the search text, every file mask row, and both the current
+            // results and the search history - back to a blank slate.
+            if (!activeNamespace) return;
+            queryInput.value = '';
+            restoreMaskInputs(['']);
+            clearSearchesForNamespace(activeNamespace);
+            saveState();
+        });
+
+        clearQueryBtn.addEventListener('click', () => {
+            queryInput.value = '';
+            queryInput.focus();
+            saveState();
+        });
+
+        clearMasksBtn.addEventListener('click', () => {
+            restoreMaskInputs(['']);
+            saveState();
+        });
+
+        clearSearchesBtn.addEventListener('click', () => {
+            if (!activeNamespace) return;
+            clearSearchesForNamespace(activeNamespace);
             saveState();
         });
 
