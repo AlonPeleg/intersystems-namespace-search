@@ -1518,7 +1518,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             </div>
             <div id="masksContainer">
                 <div class="mask-row">
-                    <input type="text" class="mask-input" value="*.cls,*.mac,*.int" placeholder="e.g. Tafnit.App.Portfolio*.cls" />
+                    <input type="text" class="mask-input" placeholder="*.cls,*.mac,*.int" />
                     <button type="button" class="icon-btn" id="addMaskBtn" title="Add mask">+</button>
                 </div>
             </div>
@@ -1902,6 +1902,15 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 triggerSearchFromKeyboard();
+            } else if (e.key === 'Tab' && !e.shiftKey) {
+                // Skip past the wildcards checkbox that sits between the
+                // search box and the masks in the DOM - Tab should go
+                // straight to the first mask box instead.
+                const firstMaskInput = masksContainer.querySelector('.mask-input');
+                if (firstMaskInput) {
+                    e.preventDefault();
+                    firstMaskInput.focus();
+                }
             }
         });
         useWildcardsCheckbox.addEventListener('change', saveState);
