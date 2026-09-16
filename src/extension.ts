@@ -259,6 +259,46 @@ function docNameToRelativePath(docName: string): string {
     return namePart.replace(/\./g, '/') + ext;
 }
 
+function escapeRegExpLiteral(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Confirmed against a real response: a match came back as
+// {"member":"checkCustomers","line":23,...}, and the server's own "console"
+// log for that exact same search read
+// "Tafnit.App.VirtualMortgage.utils.cls(checkCustomers+23): ...". That's
+// standard M label+offset notation - "line" is an offset from the START OF
+// THE MEMBER (method/query/trigger/XData block in a .cls, or a label in a
+// .mac/.int), not an absolute line number from the top of the file. To
+// recover the real source line, find where that member/label is declared in
+// the document's own text and add the offset to it.
+function findMemberDeclarationLineIndex(sourceLines: string[], member: string, isRoutineFile: boolean): number | null {
+    if (!member) return null;
+    const escaped = escapeRegExpLiteral(member);
+
+    if (isRoutineFile) {
+        // .mac/.int: a label starts in column 1 (no leading whitespace),
+        // followed by an argument list, whitespace, a comment, or end of line.
+        const labelRegex = new RegExp(`^${escaped}(?:\\(|\\s|;|$)`);
+        for (let i = 0; i < sourceLines.length; i++) {
+            if (labelRegex.test(sourceLines[i])) return i;
+        }
+        return null;
+    }
+
+    // .cls: the member is declared as "<Keyword> <Name>..." where Keyword is
+    // one of UDL's member types. Case-insensitive on the keyword, exact case
+    // on the member name (ObjectScript identifiers are case-sensitive).
+    const memberRegex = new RegExp(
+        `^\\s*(ClassMethod|ClientMethod|Method|Parameter|Property|Query|Relationship|XData|Trigger|Index|ForeignKey|Storage|Projection)\\s+${escaped}\\b`,
+        'i'
+    );
+    for (let i = 0; i < sourceLines.length; i++) {
+        if (memberRegex.test(sourceLines[i])) return i;
+    }
+    return null;
+}
+
 function httpGetJson(
     urlString: string,
     headers: Record<string, string>,
@@ -427,6 +467,24 @@ async function runServerSideSearch(
         const fileUri = vscode.Uri.joinPath(rootFolderUri, relativePath);
         const fileName = relativePath.split('/').pop() || docName;
 
+        // Only a match that's inside a named member/label needs the
+        // label+offset correction above - fetch this document's own source
+        // once (not per-match) and only when something here actually
+        // requires it, so files with no member-tagged matches (or servers
+        // that don't send "member" at all) never pay for an extra read.
+        const needsMemberResolution = rawMatches.some((m: any) => typeof m?.member === 'string' && m.member);
+        let sourceLines: string[] | null = null;
+        if (needsMemberResolution) {
+            try {
+                const fileBytes = await vscode.workspace.fs.readFile(fileUri);
+                sourceLines = new TextDecoder('utf-8').decode(fileBytes).split(/\r?\n/);
+            } catch (e: any) {
+                log(`  Could not read ${fileName} to resolve member-relative line numbers (${e.message}) - falling back to the server's raw line numbers for this file, which will be wrong for any match inside a method/label.`);
+            }
+        }
+        const isRoutineFile = /\.(mac|int)$/i.test(fileName);
+        const declLineCache = new Map<string, number | null>();
+
         const matches: MatchResult[] = [];
         for (const m of rawMatches) {
             const rawLine = m?.line ?? m?.linenumber ?? m?.lineNumber;
@@ -436,13 +494,38 @@ async function runServerSideSearch(
             // `typeof === 'number'` check silently dropped every match.
             const lineNum = typeof rawLine === 'number' ? rawLine : parseInt(String(rawLine ?? ''), 10);
             if (!Number.isFinite(lineNum)) continue;
-            // Confirmed against real files across three servers: the API's
-            // `line` is already 0-based (a raw "6" landed on the editor's
-            // line 7), matching this extension's own 0-based Position
-            // handling elsewhere - so no further adjustment is needed here.
-            // (Earlier code wrongly assumed 1-based and subtracted 1 again,
-            // which is why every server-side result opened one line early.)
-            const lineIdx = lineNum;
+            // The API's `line` is 0-based, matching this extension's own
+            // 0-based Position handling elsewhere. When the match is tagged
+            // with a member, `line` is relative to that member's own
+            // declaration line (see findMemberDeclarationLineIndex) rather
+            // than the top of the file, and needs that line added in.
+            let lineIdx = lineNum;
+            const member: string | undefined = typeof m?.member === 'string' ? m.member : undefined;
+            if (member && sourceLines) {
+                let declLineIdx: number | null;
+                if (declLineCache.has(member)) {
+                    declLineIdx = declLineCache.get(member)!;
+                } else {
+                    declLineIdx = findMemberDeclarationLineIndex(sourceLines, member, isRoutineFile);
+                    declLineCache.set(member, declLineIdx);
+                    if (declLineIdx === null) {
+                        log(`  Could not locate declaration of member "${member}" in ${fileName} - using the server's raw line number as-is for this match, which is likely wrong if the match is actually inside that member.`);
+                    }
+                }
+                if (declLineIdx !== null) {
+                    // Confirmed against a real server response: counting
+                    // exactly `lineNum` lines down from the "ClassMethod
+                    // Name(...)" declaration line itself landed 1 line short
+                    // of the true match, for more than one match in the same
+                    // method. So for a .cls, the M label+offset anchor isn't
+                    // the declaration line - it's one line after it (the
+                    // opening "{", for the common case where it's on its own
+                    // line). Routine files (.mac/.int) use a real M label,
+                    // where offset 0 IS the label line itself, so they don't
+                    // get this adjustment.
+                    lineIdx = declLineIdx + lineNum + (isRoutineFile ? 0 : 1);
+                }
+            }
 
             lineRegex.lastIndex = 0;
             let foundOnLine = false;
@@ -1980,7 +2063,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             }
 
             const nsId = activeNamespace;
-            archiveToHistory(nsId);
+            // Archiving now happens when THIS search itself finishes (see the
+            // searchCompleted/searchStopped/error handling below), not here
+            // right before starting it - so every search gets a history
+            // entry on its own, rather than only the ones a later search
+            // happens to overwrite.
 
             const state = getNsState(nsId);
             state.query = query;
@@ -2139,6 +2226,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                         statusDiv.textContent = state.statusText;
                         updateSearchButtonsForActiveTab();
                     }
+                    // This search's own results go to history the moment it
+                    // finishes - not only if/when a later search overwrites
+                    // them - so every search you actually run ends up there.
+                    archiveToHistory(nsId);
                     renderNamespacePicker();
                     saveState();
                     break;
@@ -2150,6 +2241,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                         statusDiv.textContent = state.statusText;
                         updateSearchButtonsForActiveTab();
                     }
+                    // Whatever matches had already streamed in before the
+                    // search was stopped/errored still count as a real,
+                    // completed result set for history purposes.
+                    archiveToHistory(nsId);
                     renderNamespacePicker();
                     saveState();
                     break;

@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "publisher": "alonpe",
   "engines": {
     "vscode": "^1.80.0"
