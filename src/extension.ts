@@ -552,10 +552,22 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             this.cancelAllSearches();
         });
 
+        // Whenever the view becomes visible again - whether the user clicks
+        // its activity bar icon or triggers it via a keyboard shortcut such
+        // as "workbench.view.extension.isfsNamespaceSearchContainer" - put
+        // the cursor straight into the search box so they can start typing
+        // right away.
+        webviewView.onDidChangeVisibility(() => {
+            if (webviewView.visible) {
+                this.focusQueryInput();
+            }
+        });
+
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
                 case 'ready': {
                     this.postNamespaceList();
+                    this.focusQueryInput();
                     break;
                 }
                 case 'startSearch': {
@@ -605,6 +617,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     private postNamespaceList() {
         if (!this._view) return;
         this._view.webview.postMessage({ type: 'namespaceList', namespaces: getIsfsNamespaces() });
+    }
+
+    private focusQueryInput() {
+        if (!this._view) return;
+        this._view.webview.postMessage({ type: 'focusQuery' });
     }
 
     private async executeThrottledSearch(
@@ -1608,7 +1625,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             return {
                 query: '',
                 useWildcards: true,
-                masks: DEFAULT_MASKS.slice(),
+                // Left empty (rather than pre-filled with DEFAULT_MASKS) so a
+                // namespace that's never been searched shows the defaults as
+                // a placeholder hint instead of real text to delete - see
+                // restoreMaskInputs/addMaskRow and the searchBtn fallback.
+                masks: [],
                 resultsHtml: '',
                 matchCount: 0,
                 statusText: 'Ready',
@@ -1640,7 +1661,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 const state = getNsState(activeNamespace);
                 queryInput.value = state.query || '';
                 useWildcardsCheckbox.checked = state.useWildcards !== false;
-                restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS);
+                restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS, !(state.masks && state.masks.length));
                 resultsListDiv.innerHTML = state.resultsHtml || '';
                 statusDiv.textContent = state.statusText || 'Ready';
                 renderHistoryFor(activeNamespace);
@@ -1821,7 +1842,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
             queryInput.value = state.query || '';
             useWildcardsCheckbox.checked = state.useWildcards !== false;
-            restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS);
+            restoreMaskInputs(state.masks && state.masks.length ? state.masks : DEFAULT_MASKS, !(state.masks && state.masks.length));
             resultsListDiv.innerHTML = state.resultsHtml || '';
             statusDiv.textContent = state.statusText || 'Ready';
             renderHistoryFor(nsId);
@@ -1842,24 +1863,37 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             stopBtn.style.display = searching ? 'block' : 'none';
         }
 
-        function restoreMaskInputs(masks) {
+        // asPlaceholder: when true, the masks passed in (normally the
+        // untouched DEFAULT_MASKS) are shown as grey placeholder hints
+        // instead of real input text, so tabbing into an empty namespace's
+        // mask box lands on a blank field ready to type into rather than
+        // text that has to be deleted first. Searching with it still left
+        // blank falls back to those same default masks (see searchBtn's
+        // click handler), so behavior is unchanged - only the look of the
+        // untouched field is different.
+        function restoreMaskInputs(masks, asPlaceholder) {
             masksContainer.innerHTML = '';
             if (!masks || masks.length === 0) masks = DEFAULT_MASKS;
 
             masks.forEach((maskValue, index) => {
-                addMaskRow(maskValue, index === 0);
+                addMaskRow(maskValue, index === 0, !!asPlaceholder && index === 0);
             });
         }
 
-        function addMaskRow(value = '', isFirst = false) {
+        function addMaskRow(value = '', isFirst = false, asPlaceholder = false) {
             const row = document.createElement('div');
             row.className = 'mask-row';
 
             const input = document.createElement('input');
             input.type = 'text';
             input.className = 'mask-input';
-            input.value = value;
-            input.placeholder = 'e.g. Tafnit.App.Portfolio*.cls';
+            if (asPlaceholder) {
+                input.value = '';
+                input.placeholder = value;
+            } else {
+                input.value = value;
+                input.placeholder = 'e.g. Tafnit.App.Portfolio*.cls';
+            }
             input.addEventListener('input', saveState);
             input.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
@@ -1931,7 +1965,12 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
         searchBtn.addEventListener('click', () => {
             const query = queryInput.value.trim();
-            const maskList = getMaskValues();
+            // An empty mask box is normally just the untouched DEFAULT_MASKS
+            // placeholder (see restoreMaskInputs) - searching without typing
+            // anything there should still search those default extensions,
+            // exactly as it did back when the box was pre-filled with them.
+            const typedMasks = getMaskValues();
+            const maskList = typedMasks.length ? typedMasks : DEFAULT_MASKS.slice();
             const useWildcards = useWildcardsCheckbox.checked;
 
             if (!query) return;
@@ -2052,6 +2091,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
             if (msg.type === 'namespaceList') {
                 setNamespaces(msg.namespaces);
+                return;
+            }
+
+            if (msg.type === 'focusQuery') {
+                queryInput.focus();
                 return;
             }
 
