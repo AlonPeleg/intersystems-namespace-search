@@ -1861,6 +1861,12 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             input.value = value;
             input.placeholder = 'e.g. Tafnit.App.Portfolio*.cls';
             input.addEventListener('input', saveState);
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    triggerSearchFromKeyboard();
+                }
+            });
 
             row.appendChild(input);
 
@@ -1892,11 +1898,27 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
 
         queryInput.addEventListener('input', saveState);
+        queryInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                triggerSearchFromKeyboard();
+            }
+        });
         useWildcardsCheckbox.addEventListener('change', saveState);
         addMaskBtn.addEventListener('click', () => {
             addMaskRow('', false);
             saveState();
         });
+
+        // Pressing Enter in the search box or a mask box runs the search,
+        // same as clicking the Search button - but only when that button is
+        // actually the one showing (not disabled, and not already replaced
+        // by the Stop button while a search is in flight).
+        function triggerSearchFromKeyboard() {
+            if (searchBtn.disabled) return;
+            if (searchBtn.style.display === 'none') return;
+            searchBtn.click();
+        }
 
         searchBtn.addEventListener('click', () => {
             const query = queryInput.value.trim();
