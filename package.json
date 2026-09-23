@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.1.8",
+  "version": "1.2.0",
   "publisher": "alonpe",
   "engines": {
     "vscode": "^1.80.0"
@@ -44,6 +44,10 @@
       {
         "command": "workbench.view.extension.isfsNamespaceSearchContainer",
         "key": "ctrl+alt+s"
+      },
+      {
+        "command": "isfsNamespaceSearch.goTo",
+        "key": "ctrl+alt+g"
       }
     ],
     "configuration": {
@@ -90,7 +94,14 @@
           "description": "Local-scan fallback only. Artificial delay (ms) inserted before every ISFS read/list call, on top of the concurrency limits above. Defaults to 0; raise it only if your IRIS server needs a gentler pace."
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "isfsNamespaceSearch.goTo",
+        "title": "Go To (label^routine, class, line)",
+        "category": "InterSystems"
+      }
+    ]
   },
   "devDependencies": {
     "@types/node": "^18.x",

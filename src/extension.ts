@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
 import * as https from 'https';
+import { registerGoTo } from './goto';
 
 interface MatchResult {
     fileName: string;
@@ -574,6 +575,9 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // Studio-style Go To (Ctrl+Alt+G) - separate module, doesn't touch search.
+    registerGoTo(context, log);
 
     // The cached connection info (credentials included) is only valid until
     // the InterSystems extension's own connection state changes - e.g. the
