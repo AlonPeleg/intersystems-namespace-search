@@ -1,5 +1,14 @@
 # Change Log
 
+## [1.2.2]
+
+- Go To: keyboard focus lands in the editor after the jump (it could end up in the Explorer), so you can keep typing.
+
+## [1.2.1]
+
+- Go To: when more than one namespace is open, a picker asks which namespace to open the document in.
+  The current file's namespace is listed first, then the last one picked, so Enter alone stays put.
+
 ## [1.2.0]
 
 - Added Studio-style **Go To** (`Ctrl+Alt+G`, or "InterSystems: Go To" in the Command Palette).

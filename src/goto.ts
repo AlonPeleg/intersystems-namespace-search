@@ -209,18 +209,42 @@ async function resolveDocumentUri(
     return undefined;
 }
 
-async function pickNamespaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
-    const active = vscode.window.activeTextEditor?.document.uri;
-    if (isIsfsUri(active)) {
-        const f = vscode.workspace.getWorkspaceFolder(active!);
-        if (f) return f;
-    }
+const LAST_NAMESPACE_KEY = 'isfsNamespaceSearch.goTo.lastNamespace';
+
+/**
+ * With one isfs namespace open, uses it directly. With several, always asks
+ * which one to open the document in. The namespace of the file you're in is
+ * listed first (then the one picked last time), so Enter alone keeps you in
+ * the current namespace.
+ */
+async function pickNamespaceFolder(context: vscode.ExtensionContext, docName: string): Promise<vscode.WorkspaceFolder | undefined> {
     const folders = (vscode.workspace.workspaceFolders ?? []).filter(f => isIsfsUri(f.uri));
     if (folders.length <= 1) return folders[0];
+
+    const active = vscode.window.activeTextEditor?.document.uri;
+    const currentFolder = isIsfsUri(active) ? vscode.workspace.getWorkspaceFolder(active!) : undefined;
+    const lastId = context.workspaceState.get<string>(LAST_NAMESPACE_KEY);
+
+    const rank = (f: vscode.WorkspaceFolder) =>
+        currentFolder && f.uri.toString() === currentFolder.uri.toString() ? 0
+        : f.uri.toString() === lastId ? 1
+        : 2;
+    const ordered = [...folders].sort((a, b) => rank(a) - rank(b) || a.index - b.index);
+
     const picked = await vscode.window.showQuickPick(
-        folders.map(f => ({ label: f.name, description: f.uri.authority, folder: f })),
-        { placeHolder: 'Which namespace?' }
+        ordered.map(f => {
+            const tags: string[] = [];
+            if (rank(f) === 0) tags.push('current file');
+            else if (rank(f) === 1) tags.push('last used');
+            return {
+                label: f.name,
+                description: [decodeURIComponent(f.uri.authority), ...tags].join('  ·  '),
+                folder: f
+            };
+        }),
+        { title: `Go To: ${docName}`, placeHolder: 'Open it in which namespace?' }
     );
+    if (picked) await context.workspaceState.update(LAST_NAMESPACE_KEY, picked.folder.uri.toString());
     return picked?.folder;
 }
 
@@ -244,11 +268,35 @@ function getInitialValue(context: vscode.ExtensionContext): string {
 
 async function revealLine(uri: vscode.Uri, line: number) {
     const doc = await vscode.workspace.openTextDocument(uri);
-    const editor = await vscode.window.showTextDocument(doc, { preview: false });
+    const editor = await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false });
     const safeLine = Math.max(0, Math.min(line, doc.lineCount - 1));
     const pos = new vscode.Position(safeLine, 0);
     editor.selection = new vscode.Selection(pos, pos);
     editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    await focusEditor(editor);
+}
+
+/**
+ * Closing the input box / namespace picker hands focus back to whatever had
+ * it before (Explorer, the search panel, ...), and on ISFS that restore can
+ * land after the document has opened, stealing focus from the editor. So
+ * focus the editor explicitly, and once more shortly after to win that race.
+ */
+async function focusEditor(editor: vscode.TextEditor) {
+    const refocus = async () => {
+        await vscode.window.showTextDocument(editor.document, {
+            viewColumn: editor.viewColumn,
+            preview: false,
+            preserveFocus: false,
+            selection: editor.selection
+        });
+        await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    };
+    await refocus();
+    await new Promise(resolve => setTimeout(resolve, 150));
+    if (vscode.window.activeTextEditor?.document.uri.toString() === editor.document.uri.toString()) {
+        await refocus();
+    }
 }
 
 function computeTargetLine(lines: string[], target: GoToTarget, isClass: boolean, docLabel: string): number | null {
@@ -299,8 +347,10 @@ async function runGoTo(context: vscode.ExtensionContext, log: Logger) {
         return;
     }
 
-    const folder = await pickNamespaceFolder();
+    const folder = await pickNamespaceFolder(context, input.trim());
     if (!folder) {
+        // Escape on the namespace picker is a cancel, not an error.
+        if ((vscode.workspace.workspaceFolders ?? []).some(f => isIsfsUri(f.uri))) return;
         vscode.window.showWarningMessage('Go To: no InterSystems (isfs) namespace folder is open in this workspace.');
         return;
     }
