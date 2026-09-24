@@ -217,6 +217,7 @@ interface ActivePicker {
     toggleMode(): void;
     goUp(): void;
     goToRoot(): void;
+    backspaceUp(): void;
 }
 let activePicker: ActivePicker | undefined;
 
@@ -224,6 +225,16 @@ let activePicker: ActivePicker | undefined;
 const CTX_OPEN = 'isfsNamespaceSearch.docPicker.open';
 const CTX_CAN_GO_UP = 'isfsNamespaceSearch.docPicker.canGoUp';
 const CTX_FILTER_EMPTY = 'isfsNamespaceSearch.docPicker.filterEmpty';
+
+// Holding Backspace: the key auto-repeats every few dozen ms, but VS Code
+// doesn't tell extensions whether a key is held. So a Backspace that arrives
+// within REPEAT_GAP_MS of the previous one is treated as a held repeat, and
+// one within EMPTIED_GUARD_MS of the filter being emptied by typing is
+// treated as the same hold (covers the OS's initial repeat delay). Either
+// way it's ignored, so a held Backspace stops at the empty filter and only a
+// fresh press goes up a package.
+const REPEAT_GAP_MS = 150;
+const EMPTIED_GUARD_MS = 600;
 
 function setContext(key: string, value: boolean) {
     vscode.commands.executeCommand('setContext', key, value);
@@ -242,6 +253,9 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
     let map: Flag = '1';
     let treeParent = ''; // '' = tree root
     let loadSeq = 0;
+    let lastBackspaceAt = 0; // last Backspace-driven event (deletion or ignored/handled press)
+    let emptiedAt = 0; // when typing/deleting (not us) last emptied the filter
+    let clearingFilter = false;
 
     return new Promise<string | undefined>((resolve) => {
         let done = false;
@@ -271,7 +285,7 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             iconPath: new vscode.ThemeIcon('references'),
             tooltip: `Mapped documents: ${map === '1' ? 'shown' : 'hidden'} (click to toggle)`
         });
-        const rootButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('home'), tooltip: 'Back to namespace root (Alt+Home)' };
+        const rootButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('home'), tooltip: 'Back to namespace root (Ctrl+H)' };
         let buttons = { mode: modeButton(), sys: sysButton(), gen: genButton(), map: mapButton() };
 
         const refreshChrome = () => {
@@ -288,6 +302,13 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             quickPick.placeholder =
                 `System: ${sys === '1' ? 'on' : 'off'} · Generated: ${gen === '1' ? 'on' : 'off'} · Mapped: ${map === '1' ? 'on' : 'off'}` +
                 ' — or type a full document name with extension and press Enter';
+        };
+
+        const clearFilter = () => {
+            clearingFilter = true;
+            quickPick.value = '';
+            clearingFilter = false;
+            setContext(CTX_FILTER_EMPTY, true);
         };
 
         const load = async (selectName?: string) => {
@@ -334,7 +355,7 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             if (mode === 'tree') {
                 // Flat -> Tree always starts at the namespace root.
                 treeParent = '';
-                quickPick.value = '';
+                clearFilter();
                 load();
             } else {
                 // Tree -> Flat keeps the filter text, and the document you were on if any.
@@ -348,15 +369,26 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             const cameFrom = treeParent;
             const up = treeParent.split(delim).slice(0, -1).join(delim);
             treeParent = up === '/' ? '' : up;
-            quickPick.value = '';
+            clearFilter();
             // Land on the package you just left.
             load(cameFrom);
+        };
+
+        const backspaceUp = () => {
+            const now = Date.now();
+            const heldRepeat = now - lastBackspaceAt < REPEAT_GAP_MS || now - emptiedAt < EMPTIED_GUARD_MS;
+            lastBackspaceAt = now;
+            if (heldRepeat) return;
+            // Same guard after going up, so holding Backspace on an empty
+            // filter goes up one package, not all the way to the root.
+            emptiedAt = now;
+            goUp();
         };
 
         const goToRoot = () => {
             if (mode !== 'tree' || !treeParent) return;
             treeParent = '';
-            quickPick.value = '';
+            clearFilter();
             load();
         };
 
@@ -427,7 +459,7 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             }
             if (item?.entry === 'folder') {
                 treeParent = item.fullName;
-                quickPick.value = '';
+                clearFilter();
                 load();
                 return;
             }
@@ -448,7 +480,16 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             }
         });
 
-        quickPick.onDidChangeValue((v) => setContext(CTX_FILTER_EMPTY, v.length === 0));
+        let previousValue = '';
+        quickPick.onDidChangeValue((v) => {
+            setContext(CTX_FILTER_EMPTY, v.length === 0);
+            if (!clearingFilter && v.length < previousValue.length) {
+                // A deletion by the user (Backspace/Delete/cut).
+                lastBackspaceAt = Date.now();
+                if (!v.length) emptiedAt = lastBackspaceAt;
+            }
+            previousValue = v;
+        });
 
         quickPick.onDidHide(() => {
             activePicker = undefined;
@@ -461,7 +502,7 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             quickPick.dispose();
         });
 
-        activePicker = { toggleMode, goUp, goToRoot };
+        activePicker = { toggleMode, goUp, goToRoot, backspaceUp };
         setContext(CTX_OPEN, true);
         setContext(CTX_FILTER_EMPTY, true);
         refreshChrome();
@@ -529,6 +570,7 @@ export function registerDocPicker(context: vscode.ExtensionContext, log: Logger)
         // In-picker actions (keybindings in package.json, only active while the picker is open).
         vscode.commands.registerCommand(`${COMMAND_ID}.toggleView`, () => activePicker?.toggleMode()),
         vscode.commands.registerCommand(`${COMMAND_ID}.goUp`, () => activePicker?.goUp()),
+        vscode.commands.registerCommand(`${COMMAND_ID}.backspaceUp`, () => activePicker?.backspaceUp()),
         vscode.commands.registerCommand(`${COMMAND_ID}.goToRoot`, () => activePicker?.goToRoot()),
         vscode.commands.registerCommand(COMMAND_ID, () =>
             runOpenDocument(context, log).catch((e: any) => {
