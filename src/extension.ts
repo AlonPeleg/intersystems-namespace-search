@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as http from 'http';
 import * as https from 'https';
 import { registerGoTo } from './goto';
+import { registerDocPicker } from './docPicker';
 
 interface MatchResult {
     fileName: string;
@@ -578,6 +579,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Studio-style Go To (Ctrl+Alt+G) - separate module, doesn't touch search.
     registerGoTo(context, log);
+
+    // Open InterSystems Document with a Tree <-> Flat toggle - separate module.
+    registerDocPicker(context, log);
 
     // The cached connection info (credentials included) is only valid until
     // the InterSystems extension's own connection state changes - e.g. the
