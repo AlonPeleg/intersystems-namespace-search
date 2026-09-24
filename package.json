@@ -4,6 +4,7 @@
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
   "version": "1.3.3",
   "publisher": "alonpe",
+  "icon": "images/icon.png",
   "engines": {
     "vscode": "^1.80.0"
   },
