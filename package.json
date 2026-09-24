@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
