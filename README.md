@@ -5,6 +5,7 @@ Studio-style tools for working on InterSystems IRIS code in VS Code, directly on
 - **Namespace Search**: fast Find in Files across a whole namespace, run on the server the way Studio does it.
 - **Go To**: Studio's `Ctrl+G`. Jump to `label^routine`, `##class(Pkg.Cls).Method`, a line number and more.
 - **Open Document (Tree / Flat)**: open any class or routine from a package tree or a flat list, and switch between them.
+- **Bookmarks**: mark lines with `Ctrl+F2`, jump between them with `F2`, and see them all in the sidebar. They follow your edits.
 
 It works with the server-side (`isfs`) namespace folders you open through the InterSystems extensions
 ("Edit Code in Namespace"). It reuses that connection, so there is nothing extra to configure.
@@ -99,6 +100,35 @@ The **←** and **Home** buttons in the title bar do the same as the keys and st
 
 Switching Flat → Tree starts at the namespace root. Switching Tree → Flat keeps your filter text.
 
+## Bookmarks
+
+Works in server-side (`isfs`) documents.
+
+| Key | Action |
+|---|---|
+| `Ctrl+F2` | Toggle a bookmark on the current line (on every cursor's line, with multiple cursors) |
+| `F2` | Jump to the next bookmark in this file (wraps around) |
+| `Ctrl+Alt+F2` | Clear this file's bookmarks |
+
+These keys only apply in `isfs` documents. Elsewhere `F2` is still Rename Symbol.
+
+Bookmarked lines get a yellow marker in the gutter and on the scrollbar.
+The **ISFS Bookmarks** sidebar lists them by namespace → document → bookmark. Each bookmark shows its label and offset
+(e.g. `SetTavla+3`, or the class method it's in) and its line number. Click one to jump there.
+The buttons on each row delete one bookmark, clear a document, or clear a whole namespace.
+
+**Bookmarks follow the text.** Adding or deleting lines above a bookmark moves it with its line, and editing
+the bookmarked line keeps it. Deleting the bookmarked line removes the bookmark.
+This only tracks edits made in VS Code. If a document changes elsewhere (in Studio, or on the server), a bookmark can end up on a different line.
+
+Bookmarks are saved per workspace.
+
+### No preview tabs for server documents
+
+A single click on an `isfs` document opens it as a regular tab rather than a preview tab (the one in *italics* that
+the next file replaces). Turn this off with `isfsNamespaceSearch.pinIsfsEditors`. To get the same behaviour for all
+files, use VS Code's own `workbench.editor.enablePreview: false` instead.
+
 ## Settings
 
 | Setting | Default | What it does |
@@ -111,12 +141,28 @@ Switching Flat → Tree starts at the namespace root. Switching Tree → Flat ke
 | `isfsNamespaceSearch.fileConcurrency` | `8` | Local scan: files read in parallel. |
 | `isfsNamespaceSearch.pauseBetweenReadsMs` | `0` | Local scan: delay before each server read, to go easier on a busy server. |
 | `isfsNamespaceSearch.openDocument.defaultMode` | `last` | Which view Open Document starts in: `last`, `tree` or `flat`. |
+| `isfsNamespaceSearch.pinIsfsEditors` | `true` | Open `isfs` documents as regular tabs, not preview tabs. |
 
 ## Credentials
 
-The extension talks to the server with the connection details the InterSystems ObjectScript extension provides.
-Newer versions of that extension (3.8.x) only share a password stored in plain text in your `intersystems.servers` settings.
-If searches fall back to the local scan, or Open Document says no password is available, store the password there.
+This extension never asks for a password and never shows VS Code's "wants to sign in" dialog.
+
+**Open Document** lists documents through your `isfs` namespace folder, using the connection the InterSystems extension
+already made when you added the namespace. It needs no password of its own.
+The flat list has to go through the folder one package at a time, so on a big namespace it fills in over a few seconds.
+It's then kept for 3 minutes; the **Reload** button in the title bar refreshes it.
+
+**Server-side search**, and a faster Open Document flat list, need to talk to the server directly. They use a password
+when one is available without asking:
+
+1. **`settings.json`** (`intersystems.servers`), or whatever the InterSystems ObjectScript extension provides.
+   On 3.0.x that includes the password you typed for **Add Server Namespace to Workspace**.
+2. **Server Manager's saved login**, if you've allowed this extension to use it: Accounts menu → *InterSystems Server
+   Credentials* → your login → **Manage Trusted Extensions** → tick InterSystems Namespace Search.
+
+Without one, search uses the slower local scan and Open Document uses the `isfs` folder. Both still work.
+
+**InterSystems: Forget Stored Password...** removes a password saved by versions 1.4.1 and 1.4.2.
 
 ## Credits
 

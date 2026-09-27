@@ -3,6 +3,8 @@ import * as http from 'http';
 import * as https from 'https';
 import { registerGoTo } from './goto';
 import { registerDocPicker } from './docPicker';
+import { registerBookmarks } from './bookmarks';
+import { basicAuthHeader, getCredential, onDidChangeCredentials, registerCredentials } from './credentials';
 
 interface MatchResult {
     fileName: string;
@@ -199,19 +201,23 @@ async function resolveServerConnectionUncached(folderUri: vscode.Uri): Promise<S
         return undefined;
     }
 
+    // Password: settings / InterSystems API, then Server Manager's saved
+    // login, then this extension's Secret Storage - never a prompt here, a
+    // search just falls back to the local scan instead. (The API's
+    // auth.httpAuthorizationHeader isn't used: on vscode-objectscript 3.8.x
+    // without a plain-text password it's "username:undefined" -> HTTP 401.)
     let authHeader: string | undefined;
-    if (serverForUri.username && serverForUri.password) {
-        authHeader = 'Basic ' + Buffer.from(`${serverForUri.username}:${serverForUri.password}`).toString('base64');
-        log(`  Built Basic auth header from username/password on the resolved connection.`);
-    } else if (serverForUri.auth?.httpAuthorizationHeader) {
-        // Some vscode-objectscript versions nest credentials under `auth`
-        // instead - keep this as a fallback for those.
-        authHeader = serverForUri.auth.httpAuthorizationHeader;
-        log(`  Used auth.httpAuthorizationHeader from the resolved connection.`);
+    const serverName: string = serverForUri.serverName || parseIsfsAuthority(folderUri)?.serverName || '';
+    if (serverForUri.username && serverName) {
+        const cred = await getCredential(serverName, serverForUri.username, serverForUri.password || serverForUri.auth?.password, { log });
+        if (cred) {
+            authHeader = basicAuthHeader(cred);
+            log(`  Using the password from ${cred.source}.`);
+        }
     }
 
     if (!authHeader) {
-        log(`  FAILED: no username/password (or auth.httpAuthorizationHeader) on the resolved connection.`);
+        log(`  FAILED: no password found for this server (not in settings.json, not in Server Manager, not stored by this extension). To enable fast server-side search, store it in settings.json, or allow this extension to use your Server Manager login (Accounts menu > InterSystems Server Credentials > Manage Trusted Extensions).`);
         return undefined;
     }
 
@@ -234,7 +240,9 @@ async function resolveServerConnection(folderUri: vscode.Uri): Promise<ServerCon
     const key = folderUri.toString();
     if (connectionCache.has(key)) return connectionCache.get(key);
     const resolved = await resolveServerConnectionUncached(folderUri);
-    connectionCache.set(key, resolved);
+    // Only successes are cached, so a password stored later is picked up
+    // on the next search.
+    if (resolved) connectionCache.set(key, resolved);
     return resolved;
 }
 
@@ -580,8 +588,15 @@ export function activate(context: vscode.ExtensionContext) {
     // Studio-style Go To (Ctrl+Alt+G) - separate module, doesn't touch search.
     registerGoTo(context, log);
 
+    // Password lookup shared by Open Document and server-side search.
+    registerCredentials(context);
+    context.subscriptions.push(onDidChangeCredentials(() => connectionCache.clear()));
+
     // Open InterSystems Document with a Tree <-> Flat toggle - separate module.
     registerDocPicker(context, log);
+
+    // Bookmarks for isfs documents (Ctrl+F2 / F2 / Ctrl+Alt+F2) - separate module.
+    registerBookmarks(context, log);
 
     // The cached connection info (credentials included) is only valid until
     // the InterSystems extension's own connection state changes - e.g. the
@@ -947,6 +962,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         } catch (err: any) {
             if (token.isCancellationRequested) return false;
             log(`runServerSideSearch failed: ${err?.message || err} - falling back to local scan.`);
+            // Don't keep reusing credentials the server just rejected.
+            if (/HTTP 401/.test(String(err?.message))) connectionCache.delete(folderUri.toString());
             this._view.webview.postMessage({
                 type: 'statusUpdate',
                 namespaceId,

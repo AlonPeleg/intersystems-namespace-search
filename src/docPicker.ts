@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
 import * as https from 'https';
+import { Credential, basicAuthHeader, forgetStoredPassword, getCredential, isUnauthenticated } from './credentials';
 
 // ---------------------------------------------------------------------------
 // Open InterSystems Document - with a Tree <-> Flat toggle.
@@ -39,9 +40,11 @@ const TREE_ROOT_SPEC = "*,'*.prj";
 
 interface Connection {
     base: string; // .../api/atelier/v1/<ns>
+    root: string; // .../api/atelier/
     ns: string;
     server: string;
     authHeader?: string;
+    credential?: Credential;
     allowSelfSigned: boolean;
 }
 
@@ -56,6 +59,144 @@ class HttpError extends Error {
     }
 }
 
+type Row = { Name: string; Type: number };
+interface Flags {
+    sys: Flag;
+    gen: Flag;
+    map: Flag;
+}
+
+/**
+ * Where the document lists come from: straight from the server (fast flat
+ * list, needs a password available without asking), or through the isfs
+ * folder, i.e. the InterSystems extension's own connection - no password or
+ * permission needed, but the flat list has to walk every package.
+ */
+interface DocSource {
+    kind: 'direct' | 'isfs';
+    ns: string;
+    server: string;
+    treeRoot(f: Flags): Promise<Row[]>;
+    treeChildren(pkg: string, f: Flags): Promise<Row[]>;
+    flat(f: Flags, progress: (rows: Row[]) => void, cancelled: () => boolean): Promise<Row[]>;
+    /** 'ok', or why a typed name can't be opened. Throws on other errors. */
+    validate(doc: string): Promise<'ok' | 'missing' | 'hidden' | 'invalid'>;
+}
+
+function directSource(conn: Connection): DocSource {
+    return {
+        kind: 'direct',
+        ns: conn.ns,
+        server: conn.server,
+        treeRoot: (f) => runQuery(conn, `${TREE_QUERY} WHERE Type != 5 AND Type != 10`, [TREE_ROOT_SPEC, f.sys, f.gen, f.map]),
+        treeChildren: (pkg, f) => runQuery(conn, TREE_QUERY, [`${pkg}/*`, f.sys, f.gen, f.map]),
+        flat: (f) => runQuery(conn, FLAT_QUERY, [FLAT_SPEC, f.sys, f.gen, f.map]),
+        async validate(doc) {
+            try {
+                if (doc.endsWith('.cls')) {
+                    // StudioOpenDialog so Hidden classes aren't exposed.
+                    const rows = await runQuery(conn, 'SELECT Name, Type FROM %Library.RoutineMgr_StudioOpenDialog(?,1,1,1,1,0,1,,0,1)', [doc]);
+                    return rows.length ? 'ok' : 'hidden';
+                }
+                await request(conn, 'HEAD', `/doc/${encodeURIComponent(doc)}`);
+                return 'ok';
+            } catch (e) {
+                if (e instanceof HttpError && e.status === 404) return 'missing';
+                if (e instanceof HttpError && e.status === 400) return 'invalid';
+                throw e;
+            }
+        }
+    };
+}
+
+// Flat lists built by walking isfs folders are kept for a few minutes, so
+// reopening the picker or switching views doesn't walk everything again.
+const FLAT_CACHE_MS = 3 * 60 * 1000;
+const flatCache = new Map<string, { at: number; rows: Row[] }>();
+
+function isfsSource(folder: vscode.WorkspaceFolder): DocSource {
+    const authority = decodeURIComponent(folder.uri.authority);
+    const [server, ns = ''] = authority.split(':');
+
+    // isfs folder options: system=1, generated=1, mapped=0.
+    const uriFor = (pkg: string, f: Flags) => {
+        const params = new URLSearchParams(folder.uri.query);
+        params.delete('csp');
+        if (f.sys === '1') params.set('system', '1'); else params.delete('system');
+        if (f.gen === '1') params.set('generated', '1'); else params.delete('generated');
+        if (f.map === '0') params.set('mapped', '0'); else params.delete('mapped');
+        return folder.uri.with({ path: '/' + pkg.split('.').filter(Boolean).join('/'), query: params.toString() });
+    };
+    const list = async (pkg: string, f: Flags): Promise<Row[]> => {
+        const entries = await vscode.workspace.fs.readDirectory(uriFor(pkg, f));
+        return entries
+            .filter(([name]) => !name.startsWith('.')) // e.g. .vscode
+            .map(([name, type]) => ({
+                Name: name,
+                Type: type & vscode.FileType.Directory ? 9 : /\.cls$/i.test(name) ? 4 : 0
+            }));
+    };
+
+    return {
+        kind: 'isfs',
+        ns: ns.toUpperCase(),
+        server,
+        treeRoot: (f) => list('', f),
+        treeChildren: (pkg, f) => list(pkg, f),
+        async flat(f, progress, cancelled) {
+            const key = `${folder.uri.toString()}|${f.sys}${f.gen}${f.map}`;
+            const hit = flatCache.get(key);
+            if (hit && Date.now() - hit.at < FLAT_CACHE_MS) return hit.rows;
+
+            const docs: Row[] = [];
+            const queue: string[] = [''];
+            let lastReport = 0;
+            const listOne = async (pkg: string) => {
+                let rows: Row[];
+                try {
+                    rows = await list(pkg, f);
+                } catch {
+                    return; // unreadable package: skip it, keep the rest
+                }
+                for (const r of rows) {
+                    const full = pkg ? `${pkg}.${r.Name}` : r.Name;
+                    if (r.Type === 9) queue.push(full);
+                    else docs.push({ Name: full, Type: r.Type });
+                }
+                if (Date.now() - lastReport > 300) {
+                    lastReport = Date.now();
+                    progress([...docs].sort(byName));
+                }
+            };
+            // Up to 8 package listings in flight at once.
+            const inFlight = new Set<Promise<void>>();
+            while ((queue.length || inFlight.size) && !cancelled()) {
+                while (queue.length && inFlight.size < 8) {
+                    const p: Promise<void> = listOne(queue.shift()!).finally(() => inFlight.delete(p));
+                    inFlight.add(p);
+                }
+                await Promise.race(inFlight);
+            }
+            docs.sort(byName);
+            if (!cancelled()) flatCache.set(key, { at: Date.now(), rows: docs });
+            return docs;
+        },
+        async validate(doc) {
+            try {
+                const st = await vscode.workspace.fs.stat(docNameToUri(folder.uri, doc));
+                return st.type & vscode.FileType.File ? 'ok' : 'missing';
+            } catch (e) {
+                if (e instanceof vscode.FileSystemError && e.code === 'FileNotFound') return 'missing';
+                throw e;
+            }
+        }
+    };
+}
+
+function byName(a: Row, b: Row): number {
+    return a.Name.localeCompare(b.Name, undefined, { sensitivity: 'base' });
+}
+
 function isIsfsUri(uri: vscode.Uri | undefined): boolean {
     return !!uri && (uri.scheme === 'isfs' || uri.scheme === 'isfs-readonly');
 }
@@ -64,7 +205,12 @@ function isIsfsUri(uri: vscode.Uri | undefined): boolean {
 // Connection + REST
 // ---------------------------------------------------------------------------
 
-async function resolveConnection(folder: vscode.WorkspaceFolder, log: Logger): Promise<Connection> {
+/**
+ * A direct connection if a password is available without asking anything
+ * (settings, an already-allowed Server Manager login, or one stored by this
+ * extension). Otherwise undefined.
+ */
+async function resolveConnection(folder: vscode.WorkspaceFolder, log: Logger): Promise<Connection | undefined> {
     const ext = vscode.extensions.getExtension('intersystems-community.vscode-objectscript');
     if (!ext) throw new Error('The InterSystems ObjectScript extension is not installed.');
     const api: any = ext.isActive ? ext.exports : await ext.activate();
@@ -78,18 +224,17 @@ async function resolveConnection(folder: vscode.WorkspaceFolder, log: Logger): P
     const ns: string = s.namespace || authority.split(':')[1] || '';
     if (!ns) throw new Error(`Couldn't determine the namespace of "${folder.name}".`);
 
-    let authHeader: string | undefined;
-    if (s.username && s.password) {
-        authHeader = 'Basic ' + Buffer.from(`${s.username}:${s.password}`).toString('base64');
-    } else if (s.auth?.httpAuthorizationHeader) {
-        authHeader = s.auth.httpAuthorizationHeader;
-    } else if (s.username && String(s.username).toLowerCase() !== 'unknownuser') {
-        // Newer vscode-objectscript versions only hand out a password that is
-        // stored in plain text in settings.
-        throw new Error(
-            `No password available for server "${s.serverName || authority}". ` +
-            `Store the password in your intersystems.servers settings so this command can use it.`
-        );
+    // Never use s.auth.httpAuthorizationHeader: on vscode-objectscript 3.8.x,
+    // without a plain-text password it's "username:undefined" and gets a 401.
+    const serverName: string = s.serverName || authority.split(':')[0];
+    let credential: Credential | undefined;
+    if (!isUnauthenticated(s.username)) {
+        credential = await getCredential(serverName, s.username, s.password || s.auth?.password, { log });
+        if (!credential) {
+            log(`Open Document: no password available without asking - listing through the isfs folder instead.`);
+            return undefined;
+        }
+        log(`Open Document: using the password from ${credential.source} for ${credential.username}@${serverName}`);
     }
 
     let pathPrefix: string = s.pathPrefix || '';
@@ -99,9 +244,11 @@ async function resolveConnection(folder: vscode.WorkspaceFolder, log: Logger): P
 
     const conn: Connection = {
         base: `${scheme}://${s.host}:${s.port}${pathPrefix}/api/atelier/v1/${encodeURIComponent(ns)}`,
+        root: `${scheme}://${s.host}:${s.port}${pathPrefix}/api/atelier/`,
         ns,
-        server: s.serverName || authority.split(':')[0] || s.host,
-        authHeader,
+        server: serverName || s.host,
+        authHeader: credential ? basicAuthHeader(credential) : undefined,
+        credential,
         allowSelfSigned: vscode.workspace.getConfiguration('isfsNamespaceSearch').get<boolean>('allowSelfSignedCert', false)
     };
     log(`Open Document: using ${scheme}://${s.host}:${s.port}${pathPrefix} ns=${ns}`);
@@ -110,7 +257,7 @@ async function resolveConnection(folder: vscode.WorkspaceFolder, log: Logger): P
 
 function request(conn: Connection, method: 'GET' | 'POST' | 'HEAD', path: string, body?: unknown): Promise<any> {
     return new Promise((resolve, reject) => {
-        const url = new URL(conn.base + path);
+        const url = new URL(/^https?:/.test(path) ? path : conn.base + path);
         const lib = url.protocol === 'http:' ? http : https;
         const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8');
         const headers: Record<string, string | number> = { Accept: 'application/json' };
@@ -129,7 +276,9 @@ function request(conn: Connection, method: 'GET' | 'POST' | 'HEAD', path: string
                 const status = res.statusCode || 0;
                 const text = Buffer.concat(chunks).toString('utf8');
                 if (status < 200 || status >= 300) {
-                    reject(new HttpError(status, `HTTP ${status}${text ? ': ' + text.slice(0, 300) : ''}`));
+                    // IIS/CSP error pages are HTML: keep the status, drop the markup.
+                    const detail = text && !/^\s*</.test(text) ? ': ' + text.slice(0, 300) : status === 401 ? ' Unauthorized' : '';
+                    reject(new HttpError(status, `HTTP ${status}${detail}`));
                     return;
                 }
                 if (method === 'HEAD' || !text) {
@@ -246,7 +395,7 @@ function initialMode(context: vscode.ExtensionContext): Mode {
     return context.globalState.get<Mode>(MODE_KEY, 'tree');
 }
 
-function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: Logger): Promise<string | undefined> {
+function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: Logger): Promise<string | undefined> {
     let mode: Mode = initialMode(context);
     let sys: Flag = '0';
     let gen: Flag = '0';
@@ -286,6 +435,7 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             tooltip: `Mapped documents: ${map === '1' ? 'shown' : 'hidden'} (click to toggle)`
         });
         const rootButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('home'), tooltip: 'Back to namespace root (Ctrl+H)' };
+        const refreshButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('refresh'), tooltip: 'Reload the list' };
         let buttons = { mode: modeButton(), sys: sysButton(), gen: genButton(), map: mapButton() };
 
         const refreshChrome = () => {
@@ -294,11 +444,12 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             // Back (left of the title) and Root stay put no matter how far the list is scrolled.
             quickPick.buttons = [
                 ...(inSubPackage ? [vscode.QuickInputButtons.Back, rootButton] : []),
+                ...(mode === 'flat' ? [refreshButton] : []),
                 buttons.mode, buttons.sys, buttons.gen, buttons.map
             ];
             setContext(CTX_CAN_GO_UP, inSubPackage);
             const where = mode === 'tree' && treeParent ? ` · ${treeParent}` : '';
-            quickPick.title = `Open document (${mode === 'tree' ? 'Tree' : 'Flat'}) in namespace '${conn.ns}' on server '${conn.server}'${where}`;
+            quickPick.title = `Open document (${mode === 'tree' ? 'Tree' : 'Flat'}) in namespace '${source.ns}' on server '${source.server}'${where}`;
             quickPick.placeholder =
                 `System: ${sys === '1' ? 'on' : 'off'} · Generated: ${gen === '1' ? 'on' : 'off'} · Mapped: ${map === '1' ? 'on' : 'off'}` +
                 ' — or type a full document name with extension and press Enter';
@@ -317,15 +468,25 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             refreshChrome();
             try {
                 let items: PickItem[];
+                const flags: Flags = { sys, gen, map };
                 if (mode === 'flat') {
-                    const rows = await runQuery(conn, FLAT_QUERY, [FLAT_SPEC, sys, gen, map]);
+                    const stale = () => seq !== loadSeq || done;
+                    // Through the isfs folder, documents show up as they're found.
+                    const rows = await source.flat(flags, (partial) => {
+                        if (stale()) return;
+                        quickPick.items = partial.map((r) => createItem(r));
+                        refreshChrome();
+                        quickPick.title += ` — loading... ${partial.length} documents so far`;
+                    }, stale);
+                    if (stale()) return;
+                    refreshChrome();
                     items = rows.map((r) => createItem(r));
                 } else if (!treeParent) {
-                    const rows = await runQuery(conn, `${TREE_QUERY} WHERE Type != 5 AND Type != 10`, [TREE_ROOT_SPEC, sys, gen, map]);
+                    const rows = await source.treeRoot(flags);
                     items = rows.map((r) => createItem(r));
                 } else {
                     const delim = treeParent.includes('/') ? '/' : '.';
-                    const rows = await runQuery(conn, TREE_QUERY, [`${treeParent}/*`, sys, gen, map]);
+                    const rows = await source.treeChildren(treeParent, flags);
                     const up = treeParent.split(delim).slice(0, -1).join(delim);
                     items = [
                         { label: '$(arrow-up) ..', fullName: up === '/' ? '' : up, entry: 'up' } as PickItem,
@@ -339,8 +500,7 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             } catch (e: any) {
                 if (seq !== loadSeq || done) return;
                 log(`Open Document: listing failed: ${e?.message || e}`);
-                const hint = e instanceof HttpError && e.status === 401 ? ' Check the username/password stored for this server.' : '';
-                vscode.window.showErrorMessage(`Failed to get namespace contents: ${e?.message || e}.${hint}`);
+                vscode.window.showErrorMessage(`Failed to get namespace contents: ${e?.message || e}`);
                 finish(undefined);
             } finally {
                 if (seq === loadSeq) quickPick.busy = false;
@@ -407,25 +567,17 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
                 return undefined;
             }
             try {
-                if (doc.endsWith('.cls')) {
-                    // StudioOpenDialog so Hidden classes aren't exposed.
-                    const rows = await runQuery(conn, 'SELECT Name, Type FROM %Library.RoutineMgr_StudioOpenDialog(?,1,1,1,1,0,1,,0,1)', [doc]);
-                    if (!rows.length) {
-                        vscode.window.showErrorMessage(`Class '${doc.slice(0, -4)}' does not exist, or is Hidden.`, 'Dismiss');
-                        return undefined;
-                    }
-                } else {
-                    await request(conn, 'HEAD', `/doc/${encodeURIComponent(doc)}`);
-                }
-                return doc;
-            } catch (e: any) {
-                const status = e instanceof HttpError ? e.status : 0;
+                const result = await source.validate(doc);
+                if (result === 'ok') return doc;
                 vscode.window.showErrorMessage(
-                    status === 400 ? `'${doc}' is an invalid document name.`
-                    : status === 404 ? `Document '${doc}' does not exist.`
-                    : `Couldn't validate document '${doc}': ${e?.message || e}`,
+                    result === 'hidden' ? `Class '${doc.slice(0, -4)}' does not exist, or is Hidden.`
+                    : result === 'invalid' ? `'${doc}' is an invalid document name.`
+                    : `Document '${doc}' does not exist.`,
                     'Dismiss'
                 );
+                return undefined;
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`Couldn't check document '${doc}': ${e?.message || e}`, 'Dismiss');
                 return undefined;
             }
         };
@@ -437,6 +589,11 @@ function pickDocument(context: vscode.ExtensionContext, conn: Connection, log: L
             }
             if (button === vscode.QuickInputButtons.Back) {
                 goUp();
+                return;
+            }
+            if (button === refreshButton) {
+                flatCache.clear();
+                load(quickPick.activeItems[0]?.fullName);
                 return;
             }
             if (button === rootButton) {
@@ -541,6 +698,33 @@ async function pickFolder(context: vscode.ExtensionContext): Promise<vscode.Work
     return picked?.folder;
 }
 
+/**
+ * Direct when a password is available silently and the server accepts it,
+ * otherwise through the isfs folder. Never prompts and never asks VS Code
+ * for permission to use a saved login.
+ */
+async function chooseSource(folder: vscode.WorkspaceFolder, log: Logger): Promise<DocSource> {
+    try {
+        const conn = await resolveConnection(folder, log);
+        if (conn) {
+            try {
+                await request(conn, 'GET', conn.root); // one cheap login check
+                return directSource(conn);
+            } catch (e) {
+                if (e instanceof HttpError && e.status === 401 && conn.credential) {
+                    log(`Open Document: server rejected the password from ${conn.credential.source}.`);
+                    if (conn.credential.source === 'secret') await forgetStoredPassword(conn.server, conn.credential.username);
+                } else {
+                    log(`Open Document: direct connection failed (${(e as any)?.message || e}).`);
+                }
+            }
+        }
+    } catch (e: any) {
+        log(`Open Document: couldn't resolve a direct connection (${e?.message || e}).`);
+    }
+    return isfsSource(folder);
+}
+
 async function runOpenDocument(context: vscode.ExtensionContext, log: Logger) {
     // Pressing the keybinding again while the picker is open flips Tree <-> Flat.
     if (activePicker) {
@@ -556,8 +740,9 @@ async function runOpenDocument(context: vscode.ExtensionContext, log: Logger) {
         return;
     }
 
-    const conn = await resolveConnection(folder, log);
-    const doc = await pickDocument(context, conn, log);
+    const source = await chooseSource(folder, log);
+    log(`Open Document: listing ${source.kind === 'direct' ? 'directly from the server' : 'through the isfs folder'}.`);
+    const doc = await pickDocument(context, source, log);
     if (!doc) return;
 
     const uri = docNameToUri(folder.uri, doc);

@@ -11,6 +11,6 @@
 	"objectscript.conn": {
 		"server": "phoenix-dev-29",
 		"ns": "ACC",
-		"active": true
+		"active": false
 	}
 }

@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.3.4",
+  "version": "1.4.3",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -28,6 +28,11 @@
           "id": "isfsNamespaceSearchContainer",
           "title": "ISFS Search",
           "icon": "images/isfs-search-icon.svg"
+        },
+        {
+          "id": "isfsBookmarksContainer",
+          "title": "ISFS Bookmarks",
+          "icon": "images/isfs-bookmarks-icon.svg"
         }
       ]
     },
@@ -38,6 +43,13 @@
           "id": "isfsNamespaceSearchView",
           "name": "Namespace Search",
           "icon": "images/isfs-search-icon.svg"
+        }
+      ],
+      "isfsBookmarksContainer": [
+        {
+          "id": "isfsNamespaceSearch.bookmarksView",
+          "name": "Bookmarks",
+          "icon": "images/isfs-bookmarks-icon.svg"
         }
       ]
     },
@@ -69,6 +81,21 @@
         "command": "isfsNamespaceSearch.openDocument.goToRoot",
         "key": "ctrl+h",
         "when": "isfsNamespaceSearch.docPicker.canGoUp && inQuickOpen"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.toggle",
+        "key": "ctrl+f2",
+        "when": "editorTextFocus && resourceScheme =~ /^isfs/"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.next",
+        "key": "f2",
+        "when": "editorTextFocus && resourceScheme =~ /^isfs/"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.clearFile",
+        "key": "ctrl+alt+f2",
+        "when": "editorTextFocus && resourceScheme =~ /^isfs/"
       }
     ],
     "configuration": {
@@ -128,6 +155,11 @@
             "Always open as a flat list (like vscode-objectscript 3.8.3 and later)."
           ],
           "description": "Which view 'InterSystems: Open Document (Tree / Flat)' starts in. You can switch views inside the picker with its title-bar button, or by running the command again while the picker is open."
+        },
+        "isfsNamespaceSearch.pinIsfsEditors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open server-side (isfs) documents as regular tabs instead of preview tabs, so a single click keeps them open. Only affects isfs documents; for all files use the built-in workbench.editor.enablePreview setting."
         }
       }
     },
@@ -161,6 +193,44 @@
         "command": "isfsNamespaceSearch.openDocument.backspaceUp",
         "title": "Open Document: Up One Package (Backspace on empty filter)",
         "category": "InterSystems"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.toggle",
+        "title": "Toggle Bookmark",
+        "category": "InterSystems"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.next",
+        "title": "Next Bookmark",
+        "category": "InterSystems"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.clearFile",
+        "title": "Clear Bookmarks in File",
+        "category": "InterSystems",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.clearNamespace",
+        "title": "Clear Bookmarks in Namespace",
+        "category": "InterSystems",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.delete",
+        "title": "Delete Bookmark",
+        "category": "InterSystems",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.reveal",
+        "title": "Go to Bookmark",
+        "category": "InterSystems"
+      },
+      {
+        "command": "isfsNamespaceSearch.clearStoredPassword",
+        "title": "Forget Stored Password...",
+        "category": "InterSystems"
       }
     ],
     "menus": {
@@ -180,9 +250,44 @@
         {
           "command": "isfsNamespaceSearch.openDocument.backspaceUp",
           "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.clearNamespace",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.delete",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.reveal",
+          "when": "false"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "isfsNamespaceSearch.bookmarks.delete",
+          "when": "view == isfsNamespaceSearch.bookmarksView && viewItem == bookmarkItem",
+          "group": "inline"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.clearFile",
+          "when": "view == isfsNamespaceSearch.bookmarksView && viewItem == fileItem",
+          "group": "inline"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.clearNamespace",
+          "when": "view == isfsNamespaceSearch.bookmarksView && viewItem == namespaceItem",
+          "group": "inline"
         }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "isfsNamespaceSearch.bookmarksView",
+        "contents": "No bookmarks yet.\nPress Ctrl+F2 on a line in a server-side (isfs) document to bookmark it."
+      }
+    ]
   },
   "devDependencies": {
     "@types/node": "^18.x",
