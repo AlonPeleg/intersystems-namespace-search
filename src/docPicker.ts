@@ -364,6 +364,7 @@ function docNameToUri(folderUri: vscode.Uri, name: string): vscode.Uri {
 
 interface ActivePicker {
     toggleMode(): void;
+    toggleCheck(): void;
     goUp(): void;
     goToRoot(): void;
     backspaceUp(): void;
@@ -374,6 +375,7 @@ let activePicker: ActivePicker | undefined;
 const CTX_OPEN = 'isfsNamespaceSearch.docPicker.open';
 const CTX_CAN_GO_UP = 'isfsNamespaceSearch.docPicker.canGoUp';
 const CTX_FILTER_EMPTY = 'isfsNamespaceSearch.docPicker.filterEmpty';
+const CTX_MULTI = 'isfsNamespaceSearch.docPicker.multi';
 
 // Holding Backspace: the key auto-repeats every few dozen ms, but VS Code
 // doesn't tell extensions whether a key is held. So a Backspace that arrives
@@ -395,7 +397,7 @@ function initialMode(context: vscode.ExtensionContext): Mode {
     return context.globalState.get<Mode>(MODE_KEY, 'tree');
 }
 
-function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: Logger): Promise<string | undefined> {
+function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: Logger): Promise<string[] | undefined> {
     let mode: Mode = initialMode(context);
     let sys: Flag = '0';
     let gen: Flag = '0';
@@ -405,13 +407,18 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
     let lastBackspaceAt = 0; // last Backspace-driven event (deletion or ignored/handled press)
     let emptiedAt = 0; // when typing/deleting (not us) last emptied the filter
     let clearingFilter = false;
+    // Checkbox mode: ticked documents are remembered by full name across
+    // packages and Tree/Flat switches; Enter opens them all.
+    let multi = false;
+    const checked = new Set<string>();
+    let applyingSelection = false;
 
-    return new Promise<string | undefined>((resolve) => {
+    return new Promise<string[] | undefined>((resolve) => {
         let done = false;
-        const finish = (doc: string | undefined) => {
+        const finish = (docs: string[] | undefined) => {
             if (done) return;
             done = true;
-            resolve(doc);
+            resolve(docs);
             quickPick.hide();
         };
 
@@ -436,23 +443,39 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
         });
         const rootButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('home'), tooltip: 'Back to namespace root (Ctrl+H)' };
         const refreshButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('refresh'), tooltip: 'Reload the list' };
-        let buttons = { mode: modeButton(), sys: sysButton(), gen: genButton(), map: mapButton() };
+        const multiButton = (): vscode.QuickInputButton =>
+            multi
+                ? { iconPath: new vscode.ThemeIcon('checklist'), tooltip: 'Checkbox mode is ON: tick files, Enter opens them all (click to turn off)' }
+                : { iconPath: new vscode.ThemeIcon('checklist'), tooltip: 'Open several files: checkbox mode' };
+        let buttons = { multi: multiButton(), mode: modeButton(), sys: sysButton(), gen: genButton(), map: mapButton() };
 
         const refreshChrome = () => {
-            buttons = { mode: modeButton(), sys: sysButton(), gen: genButton(), map: mapButton() };
+            buttons = { multi: multiButton(), mode: modeButton(), sys: sysButton(), gen: genButton(), map: mapButton() };
             const inSubPackage = mode === 'tree' && !!treeParent;
             // Back (left of the title) and Root stay put no matter how far the list is scrolled.
             quickPick.buttons = [
                 ...(inSubPackage ? [vscode.QuickInputButtons.Back, rootButton] : []),
                 ...(mode === 'flat' ? [refreshButton] : []),
-                buttons.mode, buttons.sys, buttons.gen, buttons.map
+                buttons.multi, buttons.mode, buttons.sys, buttons.gen, buttons.map
             ];
             setContext(CTX_CAN_GO_UP, inSubPackage);
             const where = mode === 'tree' && treeParent ? ` · ${treeParent}` : '';
-            quickPick.title = `Open document (${mode === 'tree' ? 'Tree' : 'Flat'}) in namespace '${source.ns}' on server '${source.server}'${where}`;
-            quickPick.placeholder =
-                `System: ${sys === '1' ? 'on' : 'off'} · Generated: ${gen === '1' ? 'on' : 'off'} · Mapped: ${map === '1' ? 'on' : 'off'}` +
-                ' — or type a full document name with extension and press Enter';
+            const ticks = multi ? ` · ${checked.size} ticked` : '';
+            quickPick.title = `Open document (${mode === 'tree' ? 'Tree' : 'Flat'}) in namespace '${source.ns}' on server '${source.server}'${where}${ticks}`;
+            quickPick.placeholder = multi
+                ? 'Tick files (click, or Ctrl+Enter), then press Enter to open them all'
+                : `System: ${sys === '1' ? 'on' : 'off'} · Generated: ${gen === '1' ? 'on' : 'off'} · Mapped: ${map === '1' ? 'on' : 'off'}` +
+                  ' — or type a full document name with extension and press Enter';
+        };
+
+        /** Shows `items`, re-ticking remembered documents in checkbox mode. */
+        const setItems = (items: PickItem[], activeName?: string) => {
+            applyingSelection = true;
+            quickPick.items = items;
+            if (multi) quickPick.selectedItems = items.filter((i) => i.entry === 'doc' && checked.has(i.fullName));
+            const active = activeName ? items.find((i) => i.fullName === activeName) : undefined;
+            if (active) quickPick.activeItems = [active];
+            applyingSelection = false;
         };
 
         const clearFilter = () => {
@@ -474,7 +497,7 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
                     // Through the isfs folder, documents show up as they're found.
                     const rows = await source.flat(flags, (partial) => {
                         if (stale()) return;
-                        quickPick.items = partial.map((r) => createItem(r));
+                        setItems(partial.map((r) => createItem(r)));
                         refreshChrome();
                         quickPick.title += ` — loading... ${partial.length} documents so far`;
                     }, stale);
@@ -494,9 +517,7 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
                     ];
                 }
                 if (seq !== loadSeq || done) return; // a newer load superseded this one
-                quickPick.items = items;
-                const selected = selectName ? items.find((i) => i.fullName === selectName) : undefined;
-                if (selected) quickPick.activeItems = [selected];
+                setItems(items, selectName);
             } catch (e: any) {
                 if (seq !== loadSeq || done) return;
                 log(`Open Document: listing failed: ${e?.message || e}`);
@@ -552,6 +573,49 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
             load();
         };
 
+        const toggleMulti = () => {
+            multi = !multi;
+            if (!multi) checked.clear();
+            quickPick.canSelectMany = multi;
+            setContext(CTX_MULTI, multi);
+            log(`Open Document: checkbox mode ${multi ? 'on' : 'off'}`);
+            refreshChrome();
+            setItems([...quickPick.items], quickPick.activeItems[0]?.fullName);
+        };
+
+        /** Ctrl+Enter in checkbox mode: tick/untick the highlighted file. */
+        const toggleCheck = () => {
+            const item = quickPick.activeItems[0];
+            if (!multi || !item || item.entry !== 'doc') return;
+            if (checked.has(item.fullName)) checked.delete(item.fullName);
+            else checked.add(item.fullName);
+            setItems([...quickPick.items], item.fullName);
+            refreshChrome();
+        };
+
+        quickPick.onDidChangeSelection((selection) => {
+            if (!multi || applyingSelection) return;
+            // Folders and '..' get a checkbox too (VS Code shows one on every
+            // row); clicking one navigates instead of ticking it.
+            const nav = selection.find((i) => i.entry !== 'doc');
+            if (nav) {
+                if (nav.entry === 'up') goUp();
+                else {
+                    treeParent = nav.fullName;
+                    clearFilter();
+                    load();
+                }
+                return;
+            }
+            const selected = new Set(selection.map((i) => i.fullName));
+            for (const i of quickPick.items) {
+                if (i.entry !== 'doc') continue;
+                if (selected.has(i.fullName)) checked.add(i.fullName);
+                else checked.delete(i.fullName);
+            }
+            refreshChrome();
+        });
+
         const validateTyped = async (raw: string): Promise<string | undefined> => {
             let doc = raw;
             // Normalize the extension case for classes and routines.
@@ -587,6 +651,10 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
                 toggleMode();
                 return;
             }
+            if (button === buttons.multi) {
+                toggleMulti();
+                return;
+            }
             if (button === vscode.QuickInputButtons.Back) {
                 goUp();
                 return;
@@ -609,7 +677,11 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
         });
 
         quickPick.onDidAccept(async () => {
-            const item = quickPick.selectedItems[0] ?? quickPick.activeItems[0];
+            if (multi && checked.size) {
+                finish([...checked].sort());
+                return;
+            }
+            const item = (multi ? undefined : quickPick.selectedItems[0]) ?? quickPick.activeItems[0];
             if (item?.entry === 'up') {
                 goUp();
                 return;
@@ -621,7 +693,7 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
                 return;
             }
             if (item) {
-                finish(item.fullName);
+                finish([item.fullName]);
                 return;
             }
             const typed = quickPick.value.trim();
@@ -630,7 +702,7 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
             quickPick.enabled = false;
             const doc = await validateTyped(typed);
             if (doc) {
-                finish(doc);
+                finish([doc]);
             } else if (!done) {
                 quickPick.busy = false;
                 quickPick.enabled = true;
@@ -652,6 +724,7 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
             activePicker = undefined;
             setContext(CTX_OPEN, false);
             setContext(CTX_CAN_GO_UP, false);
+            setContext(CTX_MULTI, false);
             if (!done) {
                 done = true;
                 resolve(undefined);
@@ -659,7 +732,7 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
             quickPick.dispose();
         });
 
-        activePicker = { toggleMode, goUp, goToRoot, backspaceUp };
+        activePicker = { toggleMode, toggleCheck, goUp, goToRoot, backspaceUp };
         setContext(CTX_OPEN, true);
         setContext(CTX_FILTER_EMPTY, true);
         refreshChrome();
@@ -742,18 +815,26 @@ async function runOpenDocument(context: vscode.ExtensionContext, log: Logger) {
 
     const source = await chooseSource(folder, log);
     log(`Open Document: listing ${source.kind === 'direct' ? 'directly from the server' : 'through the isfs folder'}.`);
-    const doc = await pickDocument(context, source, log);
-    if (!doc) return;
+    const docs = await pickDocument(context, source, log);
+    if (!docs?.length) return;
 
-    const uri = docNameToUri(folder.uri, doc);
-    log(`Open Document: ${doc} -> ${uri.toString()}`);
-    await vscode.window.showTextDocument(uri, { preview: false });
+    // Several: open each as its own tab, keeping focus for the last one.
+    for (let i = 0; i < docs.length; i++) {
+        const uri = docNameToUri(folder.uri, docs[i]);
+        log(`Open Document: ${docs[i]} -> ${uri.toString()}`);
+        try {
+            await vscode.window.showTextDocument(uri, { preview: false, preserveFocus: i < docs.length - 1 });
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Couldn't open ${docs[i]}: ${e?.message || e}`);
+        }
+    }
 }
 
 export function registerDocPicker(context: vscode.ExtensionContext, log: Logger) {
     context.subscriptions.push(
         // In-picker actions (keybindings in package.json, only active while the picker is open).
         vscode.commands.registerCommand(`${COMMAND_ID}.toggleView`, () => activePicker?.toggleMode()),
+        vscode.commands.registerCommand(`${COMMAND_ID}.toggleCheck`, () => activePicker?.toggleCheck()),
         vscode.commands.registerCommand(`${COMMAND_ID}.goUp`, () => activePicker?.goUp()),
         vscode.commands.registerCommand(`${COMMAND_ID}.backspaceUp`, () => activePicker?.backspaceUp()),
         vscode.commands.registerCommand(`${COMMAND_ID}.goToRoot`, () => activePicker?.goToRoot()),

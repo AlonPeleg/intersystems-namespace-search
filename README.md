@@ -85,6 +85,16 @@ It has two views of the namespace's documents:
 You can also type a full document name with its extension (e.g. `My.App.Cls.cls`) in either view and press **Enter**.
 The title-bar buttons show or hide **System**, **Generated** and **Mapped** documents.
 
+### Opening several files at once
+
+Click the **checklist** button in the title bar to turn on checkbox mode:
+
+- Click a file, or press `Ctrl+Enter` on the highlighted one, to tick it. Do the same again to untick it.
+- Ticks are kept when you move between packages and when you switch Tree / Flat, so you can collect files from anywhere.
+- VS Code shows a checkbox on every row. Clicking a package or `..` goes into it or up, rather than ticking it.
+- Press **Enter** (or **OK**) to open every ticked file, each in its own tab.
+- The title shows how many files are ticked. Clicking the button again turns checkbox mode off and clears the ticks.
+
 ### Keys while the picker is open
 
 | Key | Action |
@@ -93,6 +103,7 @@ The title-bar buttons show or hide **System**, **Generated** and **Mapped** docu
 | `Alt+Left` | Up one package |
 | `Backspace` (filter empty) | Up one package |
 | `Ctrl+H` | Back to the namespace root |
+| `Ctrl+Enter` (checkbox mode) | Tick / untick the highlighted file |
 
 These keys only work while this picker is open. Everywhere else they keep their usual VS Code behaviour.
 Holding `Backspace` deletes your filter text and stops at the empty filter, so press it again to go up.

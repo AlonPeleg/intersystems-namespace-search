@@ -1,5 +1,11 @@
 # Change Log
 
+## [1.5.0]
+
+- Open Document: **checkbox mode** for opening several files at once. Turn it on with the checklist button, tick files by
+  clicking them or with `Ctrl+Enter`, and press Enter to open them all. Ticks survive moving between packages and
+  switching Tree / Flat. Clicking a package or `..` in checkbox mode navigates instead of ticking.
+
 ## [1.4.3]
 
 - Open Document no longer needs a password or VS Code's "Allow" dialog: without a password it lists documents

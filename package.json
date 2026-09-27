@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.4.3",
+  "version": "1.5.0",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -96,6 +96,11 @@
         "command": "isfsNamespaceSearch.bookmarks.clearFile",
         "key": "ctrl+alt+f2",
         "when": "editorTextFocus && resourceScheme =~ /^isfs/"
+      },
+      {
+        "command": "isfsNamespaceSearch.openDocument.toggleCheck",
+        "key": "ctrl+enter",
+        "when": "isfsNamespaceSearch.docPicker.multi && inQuickOpen"
       }
     ],
     "configuration": {
@@ -231,6 +236,11 @@
         "command": "isfsNamespaceSearch.clearStoredPassword",
         "title": "Forget Stored Password...",
         "category": "InterSystems"
+      },
+      {
+        "command": "isfsNamespaceSearch.openDocument.toggleCheck",
+        "title": "Open Document: Tick / Untick File",
+        "category": "InterSystems"
       }
     ],
     "menus": {
@@ -261,6 +271,10 @@
         },
         {
           "command": "isfsNamespaceSearch.bookmarks.reveal",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.openDocument.toggleCheck",
           "when": "false"
         }
       ],
