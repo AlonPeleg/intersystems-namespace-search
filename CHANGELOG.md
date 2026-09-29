@@ -1,5 +1,13 @@
 # Change Log
 
+## [1.6.0]
+
+- Added **Code Log**, with its own sidebar icon: folders (Hebrew / English names) of server-side documents and their
+  labels / methods, each with a title and description edited in a Details panel. Add from the editor's right-click menu
+  (it detects the label or method at the cursor) or from the panel. Go to code opens the document, or the member by
+  name. Entries whose namespace isn't open are greyed out but kept. Drag and drop between folders. JSON export / import
+  (merge or replace).
+
 ## [1.5.0]
 
 - Open Document: **checkbox mode** for opening several files at once. Turn it on with the checklist button, tick files by

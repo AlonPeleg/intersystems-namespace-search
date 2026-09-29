@@ -5,6 +5,7 @@ Studio-style tools for working on InterSystems IRIS code in VS Code, directly on
 - **Namespace Search**: fast Find in Files across a whole namespace, run on the server the way Studio does it.
 - **Go To**: Studio's `Ctrl+G`. Jump to `label^routine`, `##class(Pkg.Cls).Method`, a line number and more.
 - **Open Document (Tree / Flat)**: open any class or routine from a package tree or a flat list, and switch between them.
+- **Code Log**: your own notes about documents, labels and methods, organised in folders, with a title and description for each.
 - **Bookmarks**: mark lines with `Ctrl+F2`, jump between them with `F2`, and see them all in the sidebar. They follow your edits.
 
 It works with the server-side (`isfs`) namespace folders you open through the InterSystems extensions
@@ -139,6 +140,41 @@ Bookmarks are saved per workspace.
 A single click on an `isfs` document opens it as a regular tab rather than a preview tab (the one in *italics* that
 the next file replaces). Turn this off with `isfsNamespaceSearch.pinIsfsEditors`. To get the same behaviour for all
 files, use VS Code's own `workbench.editor.enablePreview: false` instead.
+
+## Code Log
+
+Its own sidebar icon. Keep notes about server-side code: which documents belong to a project and what each
+document, label and method does.
+
+- **Folders:** any name, in Hebrew, English or both. Create one with **New Folder** in the panel's title bar.
+- **Documents** (`.cls`, `.mac`, `.int`) sit in folders. Each has a **title** and a **description**.
+- **Labels / methods / class methods** sit under their document, also with a title and description.
+
+**Adding things**
+
+- Right-click in a server-side document → **Add to Code Log...**. If the cursor is inside a label or method, you can add
+  that member or the whole document, then pick a folder (or create one) and give it a title.
+- In the panel: **+** on a folder adds documents with the Tree / Flat picker (checkbox mode works, so you can add several).
+  **+** on a document lists its labels or methods to pick from.
+- Drag documents between folders, or right-click → **Move to Folder...**. Right-click → **Remove** or **Rename** as needed.
+
+**Details panel**
+
+Select anything in the tree to see it in **Details** below. Edit its title and description there; changes save as you type.
+Text direction follows what you type, so Hebrew works as expected.
+
+**Going to the code**
+
+The **Go to code** arrow on a row (or button in Details) opens the document, or the document at that label or method.
+Members are found by **name** when you click, so they still work after the code is edited.
+This only works while that server and namespace is open in your workspace. Otherwise the entry is greyed out and
+marked "(not open)", but it stays in the log.
+
+**Saving, export and import**
+
+The log is saved in VS Code on this computer. **Export** (title bar) saves it as a JSON file.
+**Import** reads one back, either **merged** into your log (folders, documents and members with the same name are combined)
+or **replacing** it.
 
 ## Settings
 

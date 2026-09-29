@@ -338,7 +338,7 @@ function packageOf(docName: string): string {
 }
 
 /** vscode-objectscript's isfs mapping: every dot but the extension's becomes a folder. */
-function docNameToUri(folderUri: vscode.Uri, name: string): vscode.Uri {
+export function docNameToUri(folderUri: vscode.Uri, name: string): vscode.Uri {
     const isCsp = name.includes('/');
     const lastDot = name.lastIndexOf('.');
     let path = isCsp ? name : name.slice(0, lastDot).replace(/\./g, '/') + '.' + name.slice(lastDot + 1);
@@ -397,7 +397,7 @@ function initialMode(context: vscode.ExtensionContext): Mode {
     return context.globalState.get<Mode>(MODE_KEY, 'tree');
 }
 
-function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: Logger): Promise<string[] | undefined> {
+function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: Logger, purpose = 'Open document'): Promise<string[] | undefined> {
     let mode: Mode = initialMode(context);
     let sys: Flag = '0';
     let gen: Flag = '0';
@@ -461,7 +461,7 @@ function pickDocument(context: vscode.ExtensionContext, source: DocSource, log: 
             setContext(CTX_CAN_GO_UP, inSubPackage);
             const where = mode === 'tree' && treeParent ? ` · ${treeParent}` : '';
             const ticks = multi ? ` · ${checked.size} ticked` : '';
-            quickPick.title = `Open document (${mode === 'tree' ? 'Tree' : 'Flat'}) in namespace '${source.ns}' on server '${source.server}'${where}${ticks}`;
+            quickPick.title = `${purpose} (${mode === 'tree' ? 'Tree' : 'Flat'}) in namespace '${source.ns}' on server '${source.server}'${where}${ticks}`;
             quickPick.placeholder = multi
                 ? 'Tick files (click, or Ctrl+Enter), then press Enter to open them all'
                 : `System: ${sys === '1' ? 'on' : 'off'} · Generated: ${gen === '1' ? 'on' : 'off'} · Mapped: ${map === '1' ? 'on' : 'off'}` +
@@ -796,6 +796,28 @@ async function chooseSource(folder: vscode.WorkspaceFolder, log: Logger): Promis
         log(`Open Document: couldn't resolve a direct connection (${e?.message || e}).`);
     }
     return isfsSource(folder);
+}
+
+/**
+ * The same Tree/Flat picker (checkbox mode included), for other features
+ * that need the user to choose documents. Returns the namespace folder and
+ * the chosen document names.
+ */
+export async function chooseDocuments(
+    context: vscode.ExtensionContext,
+    log: Logger,
+    purpose: string
+): Promise<{ folder: vscode.WorkspaceFolder; docs: string[] } | undefined> {
+    if (activePicker) return undefined;
+    const folder = await pickFolder(context);
+    if (!folder) {
+        if (!(vscode.workspace.workspaceFolders ?? []).some((f) => isIsfsUri(f.uri))) {
+            vscode.window.showWarningMessage('No InterSystems (isfs) namespace folder is open in this workspace.');
+        }
+        return undefined;
+    }
+    const docs = await pickDocument(context, await chooseSource(folder, log), log, purpose);
+    return docs?.length ? { folder, docs } : undefined;
 }
 
 async function runOpenDocument(context: vscode.ExtensionContext, log: Logger) {

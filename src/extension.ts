@@ -4,6 +4,7 @@ import * as https from 'https';
 import { registerGoTo } from './goto';
 import { registerDocPicker } from './docPicker';
 import { registerBookmarks } from './bookmarks';
+import { registerCodeLog } from './codeLog';
 import { basicAuthHeader, getCredential, onDidChangeCredentials, registerCredentials } from './credentials';
 
 interface MatchResult {
@@ -597,6 +598,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Bookmarks for isfs documents (Ctrl+F2 / F2 / Ctrl+Alt+F2) - separate module.
     registerBookmarks(context, log);
+
+    // Code Log: notes about documents and their members - separate module.
+    registerCodeLog(context, log);
 
     // The cached connection info (credentials included) is only valid until
     // the InterSystems extension's own connection state changes - e.g. the
