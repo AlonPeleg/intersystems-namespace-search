@@ -141,26 +141,31 @@ A single click on an `isfs` document opens it as a regular tab rather than a pre
 the next file replaces). Turn this off with `isfsNamespaceSearch.pinIsfsEditors`. To get the same behaviour for all
 files, use VS Code's own `workbench.editor.enablePreview: false` instead.
 
-## Code Log
+## Code Log: `Ctrl+Alt+L`
 
-Its own sidebar icon. Keep notes about server-side code: which documents belong to a project and what each
+Its own sidebar icon; `Ctrl+Alt+L` opens it. Keep notes about server-side code: which documents belong to a project and what each
 document, label and method does.
 
-- **Folders:** any name, in Hebrew, English or both. Create one with **New Folder** in the panel's title bar.
+- **Folders and subfolders**, to any depth: any name, in Hebrew, English or both. **New Folder** in the panel's title bar
+  creates a top-level folder; the folder icon on a folder row (or right-click → **New Subfolder**) creates one inside it.
 - **Documents** (`.cls`, `.mac`, `.int`) sit in folders. Each has a **title** and a **description**.
 - **Labels / methods / class methods** sit under their document, also with a title and description.
 
 **Adding things**
 
 - Right-click in a server-side document → **Add to Code Log...**. If the cursor is inside a label or method, you can add
-  that member or the whole document, then pick a folder (or create one) and give it a title.
+  that member or the whole document, then pick a folder and give it a title. Adding only lets you pick an existing
+  folder or subfolder; create folders in the panel.
 - In the panel: **+** on a folder adds documents with the Tree / Flat picker (checkbox mode works, so you can add several).
   **+** on a document lists its labels or methods to pick from.
-- Drag documents between folders, or right-click → **Move to Folder...**. Right-click → **Remove** or **Rename** as needed.
+- Drag documents or folders onto another folder (or a folder onto empty space for the top level), or right-click →
+  **Move to Folder...**. Right-click → **Remove** or **Rename** as needed.
+- In the tree, an entry with a title shows the **title** as its main text and the document or method name beside it.
 
 **Details panel**
 
-Select anything in the tree to see it in **Details** below. Edit its title and description there; changes save as you type.
+Select anything in the tree to see it in **Details** below: its namespace, folder path, document (and method), then its
+title and description, which you edit there. Changes save as you type.
 Text direction follows what you type, so Hebrew works as expected.
 
 **Going to the code**
@@ -170,11 +175,26 @@ Members are found by **name** when you click, so they still work after the code 
 This only works while that server and namespace is open in your workspace. Otherwise the entry is greyed out and
 marked "(not open)", but it stays in the log.
 
+**Projects**
+
+Top-level folders are **projects**. They have their own icon and an emphasised name, so they stand out from subfolders.
+
 **Saving, export and import**
 
-The log is saved in VS Code on this computer. **Export** (title bar) saves it as a JSON file.
-**Import** reads one back, either **merged** into your log (folders, documents and members with the same name are combined)
-or **replacing** it.
+The log is saved in VS Code on this computer.
+
+- **Export** in the title bar saves the whole log as a JSON file.
+- **Export Project** (the export icon on a project row, or right-click) saves just that project with its subfolders.
+  Subfolders can't be exported on their own.
+- **Import** in the title bar reads either kind of file:
+  - a **project** you don't have yet is simply added;
+  - a project with the same name as one of yours offers **Merge**, **Replace** (just that project) or **Add as a copy**;
+  - a file with **several projects** (e.g. a whole-log export) shows a checklist of its projects, all ticked, each
+    marked *new* or *already exists*. Untick any you don't want. If some ticked ones already exist, a second list asks
+    which to **overwrite**; unticked ones are **merged** into yours. New ones are added, and projects that aren't in
+    the file are never touched.
+
+Export and import dialogs open on your Desktop and save to / read from your own computer.
 
 ## Settings
 

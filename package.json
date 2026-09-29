@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.6.0",
+  "version": "1.7.3",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -13,7 +13,8 @@
   ],
   "activationEvents": [
     "onFileSystem:isfs",
-    "onFileSystem:isfs-readonly"
+    "onFileSystem:isfs-readonly",
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "scripts": {
@@ -75,6 +76,10 @@
       {
         "command": "workbench.view.extension.isfsNamespaceSearchContainer",
         "key": "ctrl+alt+s"
+      },
+      {
+        "command": "workbench.view.extension.isfsCodeLogContainer",
+        "key": "ctrl+alt+l"
       },
       {
         "command": "isfsNamespaceSearch.goTo",
@@ -267,6 +272,12 @@
         "icon": "$(new-folder)"
       },
       {
+        "command": "isfsNamespaceSearch.codeLog.newSubfolder",
+        "title": "New Subfolder",
+        "category": "Code Log",
+        "icon": "$(new-folder)"
+      },
+      {
         "command": "isfsNamespaceSearch.codeLog.renameFolder",
         "title": "Rename Folder",
         "category": "Code Log",
@@ -296,7 +307,7 @@
         "icon": "$(go-to-file)"
       },
       {
-        "command": "isfsNamespaceSearch.codeLog.moveFile",
+        "command": "isfsNamespaceSearch.codeLog.move",
         "title": "Move to Folder...",
         "category": "Code Log",
         "icon": "$(folder-opened)"
@@ -315,9 +326,15 @@
       },
       {
         "command": "isfsNamespaceSearch.codeLog.import",
-        "title": "Import Code Log (JSON)...",
+        "title": "Import Code Log or Project (JSON)...",
         "category": "Code Log",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.exportProject",
+        "title": "Export Project (JSON)...",
+        "category": "Code Log",
+        "icon": "$(export)"
       }
     ],
     "menus": {
@@ -367,11 +384,19 @@
           "when": "false"
         },
         {
-          "command": "isfsNamespaceSearch.codeLog.moveFile",
+          "command": "isfsNamespaceSearch.codeLog.remove",
           "when": "false"
         },
         {
-          "command": "isfsNamespaceSearch.codeLog.remove",
+          "command": "isfsNamespaceSearch.codeLog.move",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.newSubfolder",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.exportProject",
           "when": "false"
         }
       ],
@@ -392,19 +417,34 @@
           "group": "inline"
         },
         {
-          "command": "isfsNamespaceSearch.codeLog.addFiles",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logFolder",
+          "command": "isfsNamespaceSearch.codeLog.newSubfolder",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Project|Folder)$/",
           "group": "inline@1"
         },
         {
           "command": "isfsNamespaceSearch.codeLog.addFiles",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logFolder",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Project|Folder)$/",
+          "group": "inline@2"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.addFiles",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Project|Folder)$/",
           "group": "1_add@1"
         },
         {
+          "command": "isfsNamespaceSearch.codeLog.newSubfolder",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Project|Folder)$/",
+          "group": "1_add@2"
+        },
+        {
           "command": "isfsNamespaceSearch.codeLog.renameFolder",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logFolder",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Project|Folder)$/",
           "group": "2_edit@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.move",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Project|Folder|File)/",
+          "group": "2_edit@2"
         },
         {
           "command": "isfsNamespaceSearch.codeLog.addMembers",
@@ -413,12 +453,7 @@
         },
         {
           "command": "isfsNamespaceSearch.codeLog.open",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logFile",
-          "group": "inline@2"
-        },
-        {
-          "command": "isfsNamespaceSearch.codeLog.open",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logMember",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(File|Member)$/",
           "group": "inline@2"
         },
         {
@@ -432,14 +467,19 @@
           "group": "1_add@1"
         },
         {
-          "command": "isfsNamespaceSearch.codeLog.moveFile",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^logFile/",
-          "group": "2_edit@2"
-        },
-        {
           "command": "isfsNamespaceSearch.codeLog.remove",
           "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log/",
           "group": "9_remove@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.exportProject",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logProject",
+          "group": "inline@3"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.exportProject",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logProject",
+          "group": "3_share@1"
         }
       ],
       "view/title": [

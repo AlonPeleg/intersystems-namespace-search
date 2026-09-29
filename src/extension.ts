@@ -586,31 +586,54 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // Each feature starts on its own: if one ever fails, the others still
+    // load (instead of leaving their panels stuck on "loading").
+    const start = (name: string, fn: () => void) => {
+        try {
+            fn();
+        } catch (e: any) {
+            log(`Failed to start ${name}: ${e?.stack || e}`);
+            vscode.window.showErrorMessage(`InterSystems Namespace Search: ${name} failed to start (${e?.message || e}). See View > Output > "ISFS Namespace Search".`);
+        }
+    };
+
     // Studio-style Go To (Ctrl+Alt+G) - separate module, doesn't touch search.
-    registerGoTo(context, log);
+    start('Go To', () => registerGoTo(context, log));
 
     // Password lookup shared by Open Document and server-side search.
-    registerCredentials(context);
-    context.subscriptions.push(onDidChangeCredentials(() => connectionCache.clear()));
+    start('password lookup', () => {
+        registerCredentials(context);
+        context.subscriptions.push(onDidChangeCredentials(() => connectionCache.clear()));
+    });
 
     // Open InterSystems Document with a Tree <-> Flat toggle - separate module.
-    registerDocPicker(context, log);
+    start('Open Document', () => registerDocPicker(context, log));
 
     // Bookmarks for isfs documents (Ctrl+F2 / F2 / Ctrl+Alt+F2) - separate module.
-    registerBookmarks(context, log);
+    start('Bookmarks', () => registerBookmarks(context, log));
 
     // Code Log: notes about documents and their members - separate module.
-    registerCodeLog(context, log);
+    start('Code Log', () => registerCodeLog(context, log));
 
     // The cached connection info (credentials included) is only valid until
     // the InterSystems extension's own connection state changes - e.g. the
     // user reconnects or edits server settings - so drop it then rather than
     // risk searching with stale credentials until the extension host restarts.
-    activateExtensionExports('intersystems-community.vscode-objectscript').then((api) => {
-        if (api?.onDidChangeConnection) {
-            context.subscriptions.push(api.onDidChangeConnection(() => connectionCache.clear()));
-        }
-    });
+    // Only hooked up once a namespace folder is open: this extension also
+    // starts in windows with no InterSystems folders (for Code Log), and
+    // shouldn't wake the InterSystems extension there.
+    let hooked = false;
+    const hookConnectionChanges = () => {
+        if (hooked || !getIsfsWorkspaceFolders().length) return;
+        hooked = true;
+        activateExtensionExports('intersystems-community.vscode-objectscript').then((api) => {
+            if (api?.onDidChangeConnection) {
+                context.subscriptions.push(api.onDidChangeConnection(() => connectionCache.clear()));
+            }
+        });
+    };
+    hookConnectionChanges();
+    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(hookConnectionChanges));
 }
 
 export function deactivate() {}

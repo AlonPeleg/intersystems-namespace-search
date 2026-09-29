@@ -1,5 +1,40 @@
 # Change Log
 
+## [1.7.3]
+
+- Code Log: top-level folders are **projects**, with their own icon and emphasised name.
+- **Export Project**: export a single project (with its subfolders) as JSON.
+- Import reads both whole-log and project exports:
+  - a single project with the same name as one of yours can be merged, replace just that project, or be added as a copy;
+  - a file with several projects shows a checklist of which to import, then which of the ones you already have to
+    overwrite (the rest are merged). Projects not in the file are never touched.
+- Imported items get fresh ids, so re-importing your own export can't clash.
+- Export and import dialogs start in your Desktop (including a OneDrive Desktop).
+
+## [1.7.2]
+
+- Fixed Code Log (and Bookmarks) staying on "loading" when no namespace folder is open: the extension now also starts
+  once VS Code has finished starting up, not only when an isfs folder opens. It still only wakes the InterSystems
+  extension when a namespace folder is open.
+- Each feature starts independently, so a problem in one can't stop the others from loading.
+- Code Log: empty folders show "empty".
+
+## [1.7.1]
+
+- Code Log: `Ctrl+Alt+L` opens the Code Log sidebar.
+- Folder document counts moved to a badge at the right edge of the row; Hebrew folder names no longer pull the number
+  into the name ("תיק2 files").
+- Hebrew titles and the English document / method names beside them no longer run into each other.
+
+## [1.7.0]
+
+- Code Log: **subfolders** to any depth (New Subfolder on a folder), and folders can be moved by drag and drop or
+  "Move to Folder..." (including back to the top level). Existing logs are upgraded automatically.
+- Adding a document or member (editor right-click or panel) only picks an existing folder or subfolder; folders are
+  created in the panel.
+- Tree shows the title as the main text when there is one, with the document / method name beside it.
+- Redesigned Details panel: namespace, folder path, document and method at the top, then title and description.
+
 ## [1.6.0]
 
 - Added **Code Log**, with its own sidebar icon: folders (Hebrew / English names) of server-side documents and their
