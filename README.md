@@ -158,9 +158,22 @@ document, label and method does.
   folder or subfolder; create folders in the panel.
 - In the panel: **+** on a folder adds documents with the Tree / Flat picker (checkbox mode works, so you can add several).
   **+** on a document lists its labels or methods to pick from.
-- Drag documents or folders onto another folder (or a folder onto empty space for the top level), or right-click →
-  **Move to Folder...**. Right-click → **Remove** or **Rename** as needed.
+- Drag documents or subfolders onto another folder (or a subfolder onto empty space to make it a project), or right-click →
+  **Move to Folder...**. **Copy to Folder...** makes a copy instead, with all its notes. Projects themselves can't be
+  moved or copied. Right-click → **Remove** or **Rename** as needed.
 - In the tree, an entry with a title shows the **title** as its main text and the document or method name beside it.
+
+**Groups inside a document**
+
+A document with many logged labels / methods can be organised into **groups**:
+
+- Right-click a document → **New Group...**. Groups have a name (Hebrew / English) and a description, like everything else.
+- Put members in a group by dragging them onto it, or right-click a member → **Move to Group...** (which can also
+  create a new group). Members not in a group are listed after the groups.
+- Drag members onto each other to reorder them, onto a group to join it, or onto the document to take them out of their group.
+  Drag groups onto each other to reorder groups. Members stay within their own document.
+- **+** on a group adds labels / methods straight into it. Each group shows a count badge and collapses like a folder.
+- Removing a group keeps its members: they just become ungrouped.
 
 **Details panel**
 

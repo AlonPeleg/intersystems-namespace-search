@@ -1,5 +1,18 @@
 # Change Log
 
+## [1.7.5]
+
+- Code Log: **groups** inside a document, to organise many labels / methods. New Group (right-click a document),
+  Move to Group (right-click a member), drag and drop to join, leave or reorder, count badges, and adding members
+  straight into a group. Removing a group keeps its members. Groups are kept when copying, exporting and importing
+  (same-named groups merge).
+
+## [1.7.4]
+
+- Code Log: **Copy to Folder...** (right-click on a document or subfolder) copies it with all its notes; a copied
+  subfolder can also become a new project.
+- Projects (top-level folders) no longer offer Move to Folder and can't be dragged.
+
 ## [1.7.3]
 
 - Code Log: top-level folders are **projects**, with their own icon and emphasised name.

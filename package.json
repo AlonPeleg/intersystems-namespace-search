@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.7.3",
+  "version": "1.7.5",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -296,6 +296,24 @@
         "icon": "$(add)"
       },
       {
+        "command": "isfsNamespaceSearch.codeLog.newGroup",
+        "title": "New Group...",
+        "category": "Code Log",
+        "icon": "$(layers)"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.renameGroup",
+        "title": "Rename Group",
+        "category": "Code Log",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.moveToGroup",
+        "title": "Move to Group...",
+        "category": "Code Log",
+        "icon": "$(layers)"
+      },
+      {
         "command": "isfsNamespaceSearch.codeLog.addFromEditor",
         "title": "Add to Code Log...",
         "category": "Code Log"
@@ -311,6 +329,12 @@
         "title": "Move to Folder...",
         "category": "Code Log",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.copy",
+        "title": "Copy to Folder...",
+        "category": "Code Log",
+        "icon": "$(copy)"
       },
       {
         "command": "isfsNamespaceSearch.codeLog.remove",
@@ -398,6 +422,22 @@
         {
           "command": "isfsNamespaceSearch.codeLog.exportProject",
           "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.copy",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.newGroup",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.renameGroup",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.moveToGroup",
+          "when": "false"
         }
       ],
       "view/item/context": [
@@ -443,12 +483,17 @@
         },
         {
           "command": "isfsNamespaceSearch.codeLog.move",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Project|Folder|File)/",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Folder|File)/",
           "group": "2_edit@2"
         },
         {
+          "command": "isfsNamespaceSearch.codeLog.copy",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(Folder|File)/",
+          "group": "2_edit@3"
+        },
+        {
           "command": "isfsNamespaceSearch.codeLog.addMembers",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^logFile/",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(File|Group)/",
           "group": "inline@1"
         },
         {
@@ -463,7 +508,7 @@
         },
         {
           "command": "isfsNamespaceSearch.codeLog.addMembers",
-          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^logFile/",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^log(File|Group)/",
           "group": "1_add@1"
         },
         {
@@ -480,6 +525,21 @@
           "command": "isfsNamespaceSearch.codeLog.exportProject",
           "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logProject",
           "group": "3_share@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.newGroup",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^logFile/",
+          "group": "1_add@2"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.renameGroup",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem == logGroup",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.moveToGroup",
+          "when": "view == isfsNamespaceSearch.codeLogTree && viewItem =~ /^logMember/",
+          "group": "2_edit@1"
         }
       ],
       "view/title": [

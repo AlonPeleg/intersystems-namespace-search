@@ -29,6 +29,15 @@ interface LogMember {
     kind: string; // Label, ClassMethod, Method, Query, ...
     title: string;
     description: string;
+    /** id of the LogGroup (in the same document) this member is in, if any. */
+    group?: string;
+}
+
+/** A named group of members inside one document, just for organising the view. */
+interface LogGroup {
+    id: string;
+    name: string;
+    description: string;
 }
 
 interface LogFile {
@@ -38,6 +47,7 @@ interface LogFile {
     doc: string; // Pkg.Sub.Cls.cls, ROUTINE.mac
     title: string;
     description: string;
+    groups: LogGroup[];
     members: LogMember[];
 }
 
@@ -57,10 +67,13 @@ interface LogData {
 type Node =
     | { kind: 'folder'; id: string; folder: LogFolder; parent?: LogFolder }
     | { kind: 'file'; id: string; folder: LogFolder; file: LogFile }
-    | { kind: 'member'; id: string; folder: LogFolder; file: LogFile; member: LogMember };
+    | { kind: 'group'; id: string; folder: LogFolder; file: LogFile; group: LogGroup }
+    | { kind: 'member'; id: string; folder: LogFolder; file: LogFile; member: LogMember; group?: LogGroup };
 
 type FolderNode = Extract<Node, { kind: 'folder' }>;
 type FileNode = Extract<Node, { kind: 'file' }>;
+type GroupNode = Extract<Node, { kind: 'group' }>;
+type MemberNode = Extract<Node, { kind: 'member' }>;
 
 const STORAGE_KEY = 'isfsNamespaceSearch.codeLog';
 const TREE_ID = 'isfsNamespaceSearch.codeLogTree';
@@ -186,15 +199,26 @@ function normalizeFolder(f: any): LogFolder {
             doc: x.doc,
             title: x.title || '',
             description: x.description || '',
-            members: (x.members || []).filter((m: any) => typeof m?.name === 'string').map((m: any) => ({
-                id: m.id || newId(),
-                name: m.name,
-                kind: m.kind || 'Label',
-                title: m.title || '',
-                description: m.description || ''
-            }))
+            ...normalizeMembers(x)
         }))
     };
+}
+
+/** Groups and members of a document; a member pointing at a missing group becomes ungrouped. */
+function normalizeMembers(x: any): { groups: LogGroup[]; members: LogMember[] } {
+    const groups: LogGroup[] = (Array.isArray(x.groups) ? x.groups : [])
+        .filter((g: any) => typeof g?.name === 'string')
+        .map((g: any) => ({ id: g.id || newId(), name: g.name, description: g.description || '' }));
+    const ids = new Set(groups.map((g) => g.id));
+    const members: LogMember[] = (x.members || []).filter((m: any) => typeof m?.name === 'string').map((m: any) => ({
+        id: m.id || newId(),
+        name: m.name,
+        kind: m.kind || 'Label',
+        title: m.title || '',
+        description: m.description || '',
+        ...(m.group && ids.has(m.group) ? { group: m.group } : {})
+    }));
+    return { groups, members };
 }
 
 function normalize(d: any): LogData {
@@ -221,7 +245,11 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             for (const sub of folder.folders) walk(sub, folder);
             for (const file of folder.files) {
                 nodes.set(file.id, { kind: 'file', id: file.id, folder, file });
-                for (const member of file.members) nodes.set(member.id, { kind: 'member', id: member.id, folder, file, member });
+                const groupById = new Map(file.groups.map((g) => [g.id, g]));
+                for (const group of file.groups) nodes.set(group.id, { kind: 'group', id: group.id, folder, file, group });
+                for (const member of file.members) {
+                    nodes.set(member.id, { kind: 'member', id: member.id, folder, file, member, group: member.group ? groupById.get(member.group) : undefined });
+                }
             }
         };
         data.folders.forEach((f) => walk(f));
@@ -258,14 +286,20 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     const provider: vscode.TreeDataProvider<Node> = {
         onDidChangeTreeData: treeChanged.event,
         getParent: (n) => {
-            if (n.kind === 'member') return nodes.get(n.file.id);
+            if (n.kind === 'member') return nodes.get(n.group ? n.group.id : n.file.id);
+            if (n.kind === 'group') return nodes.get(n.file.id);
             if (n.kind === 'file') return nodes.get(n.folder.id);
             return n.parent ? nodes.get(n.parent.id) : undefined;
         },
         getChildren: (n) => {
             if (!n) return data.folders.map((f) => nodes.get(f.id)!);
             if (n.kind === 'folder') return [...n.folder.folders.map((f) => nodes.get(f.id)!), ...n.folder.files.map((f) => nodes.get(f.id)!)];
-            if (n.kind === 'file') return n.file.members.map((m) => nodes.get(m.id)!);
+            // Groups first, then members not in a group.
+            if (n.kind === 'file') return [
+                ...n.file.groups.map((g) => nodes.get(g.id)!),
+                ...n.file.members.filter((m) => !m.group).map((m) => nodes.get(m.id)!)
+            ];
+            if (n.kind === 'group') return n.file.members.filter((m) => m.group === n.group.id).map((m) => nodes.get(m.id)!);
             return [];
         },
         getTreeItem: (n) => {
@@ -292,7 +326,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 // Title as the main text when there is one; the document name next to it.
                 const item = new vscode.TreeItem(
                     isolate(n.file.title || n.file.doc),
-                    n.file.members.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+                    n.file.members.length || n.file.groups.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
                 );
                 item.id = n.id;
                 const icon = /\.cls$/i.test(n.file.doc) ? 'symbol-class' : 'file-code';
@@ -305,6 +339,20 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 if (!open) md.appendMarkdown(`\n\n_Namespace ${escapeMd(n.file.ns)} on ${escapeMd(n.file.server)} isn't open in this workspace._`);
                 item.tooltip = md;
                 item.contextValue = open ? 'logFile' : 'logFileClosed';
+                return item;
+            }
+            if (n.kind === 'group') {
+                const count = n.file.members.filter((m) => m.group === n.group.id).length;
+                const item = new vscode.TreeItem(
+                    isolate(n.group.name),
+                    count ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None
+                );
+                item.id = n.id;
+                item.iconPath = new vscode.ThemeIcon('layers');
+                item.resourceUri = vscode.Uri.from({ scheme: DECO_SCHEME, path: '/' + n.id }); // count badge
+                if (!count) item.description = 'empty';
+                item.tooltip = [n.group.name, n.group.description].filter(Boolean).join('\n\n');
+                item.contextValue = 'logGroup';
                 return item;
             }
             const open = !!folderFor(n.file.server, n.file.ns);
@@ -323,18 +371,23 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         dragMimeTypes: [DRAG_MIME],
         dropMimeTypes: [DRAG_MIME],
         handleDrag(source, transfer) {
-            const ids = source.filter((n) => n.kind === 'file' || n.kind === 'folder').map((n) => n.id);
+            // Documents, subfolders, groups and members; projects (top-level folders) stay put.
+            const ids = source
+                .filter((n) => n.kind === 'file' || n.kind === 'group' || n.kind === 'member' || (n.kind === 'folder' && !!n.parent))
+                .map((n) => n.id);
             if (ids.length) transfer.set(DRAG_MIME, new vscode.DataTransferItem(ids));
         },
         async handleDrop(target, transfer) {
             const ids: string[] | undefined = transfer.get(DRAG_MIME)?.value;
             if (!ids?.length) return;
             // Onto a folder: into it. Onto a document/member: into its folder. Onto empty space: top level (folders only).
-            const to = target ? (target.kind === 'folder' ? target.folder : target.folder) : undefined;
+            const to = target ? target.folder : undefined;
             for (const id of ids) {
                 const n = nodes.get(id);
                 if (n?.kind === 'file' && to) moveFile(n, to);
                 else if (n?.kind === 'folder') moveFolder(n, to);
+                else if (n?.kind === 'member') dropMember(n, target);
+                else if (n?.kind === 'group') dropGroup(n, target);
             }
             changed();
         }
@@ -357,6 +410,10 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             provideFileDecoration(uri) {
                 if (uri.scheme !== DECO_SCHEME) return undefined;
                 const n = nodes.get(uri.path.slice(1));
+                if (n?.kind === 'group') {
+                    const count = n.file.members.filter((m) => m.group === n.group.id).length;
+                    return count ? new vscode.FileDecoration(count > 99 ? '99' : String(count), `${count} in this group`) : undefined;
+                }
                 if (n?.kind !== 'folder') return undefined;
                 const total = countFiles(n.folder);
                 if (!total) return undefined;
@@ -431,7 +488,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         }
         const picked = await vscode.window.showQuickPick(
             choices.map(({ folder, depth }) => ({
-                label: `${' '.repeat(depth)}$(folder) ${folder.name}`,
+                label: `${' '.repeat(depth)}$(${depth ? 'folder' : 'project'}) ${folder.name}`,
                 description: depth ? pathOf(folder).slice(0, -1).join(' › ') : '',
                 folder
             })),
@@ -461,7 +518,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     const addFile = (folder: LogFolder, server: string, ns: string, doc: string): LogFile => {
         const existing = folder.files.find((x) => sameDoc(x, server, ns, doc));
         if (existing) return existing;
-        const file: LogFile = { id: newId(), server, ns: ns.toUpperCase(), doc, title: '', description: '', members: [] };
+        const file: LogFile = { id: newId(), server, ns: ns.toUpperCase(), doc, title: '', description: '', groups: [], members: [] };
         folder.files.push(file);
         return file;
     };
@@ -497,8 +554,62 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         (to ? to.folders : data.folders).push(folder);
     };
 
+    /** Member dropped: onto a group (join it), a member (reorder next to it), or its document (ungroup). */
+    const dropMember = (n: MemberNode, target: Node | undefined) => {
+        if (!target || target.kind === 'folder') return;
+        if (target.file !== n.file) {
+            vscode.window.showWarningMessage('Labels and methods can only be arranged within their own document.');
+            return;
+        }
+        const list = n.file.members;
+        if (target.kind === 'member') {
+            if (target.member === n.member) return;
+            list.splice(list.indexOf(n.member), 1);
+            list.splice(list.indexOf(target.member), 0, n.member); // just before the target
+            setGroup(n.member, target.member.group);
+        } else {
+            // Onto a group or the document: to the end of that list.
+            list.splice(list.indexOf(n.member), 1);
+            list.push(n.member);
+            setGroup(n.member, target.kind === 'group' ? target.group.id : undefined);
+        }
+    };
+
+    /** Group dropped onto another group of the same document: placed just before it. */
+    const dropGroup = (n: GroupNode, target: Node | undefined) => {
+        if (!target || target.kind === 'folder' || target.file !== n.file) return;
+        const before = target.kind === 'group' ? target.group : target.kind === 'member' ? target.group : undefined;
+        if (before === n.group) return;
+        const list = n.file.groups;
+        list.splice(list.indexOf(n.group), 1);
+        if (before) list.splice(list.indexOf(before), 0, n.group);
+        else list.push(n.group);
+    };
+
+    const setGroup = (m: LogMember, groupId: string | undefined) => {
+        if (groupId) m.group = groupId;
+        else delete m.group;
+    };
+
+    const askGroupName = async (title: string, value = '') =>
+        (await vscode.window.showInputBox({
+            title,
+            prompt: 'Group name (Hebrew, English or both)',
+            value,
+            ignoreFocusOut: true,
+            validateInput: (v) => (v.trim() ? undefined : 'Enter a name')
+        }))?.trim();
+
+    const createGroup = async (file: LogFile): Promise<LogGroup | undefined> => {
+        const name = await askGroupName(`New group in ${file.doc}`);
+        if (!name) return undefined;
+        const group: LogGroup = { id: newId(), name, description: '' };
+        file.groups.push(group);
+        return group;
+    };
+
     const openNode = async (n: Node | undefined) => {
-        if (!n || n.kind === 'folder') return;
+        if (!n || n.kind === 'folder' || n.kind === 'group') return;
         const ws = folderFor(n.file.server, n.file.ns);
         if (!ws) {
             vscode.window.showInformationMessage(
@@ -539,9 +650,9 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         const n = msg?.id ? nodes.get(msg.id) : undefined;
         if (!n) return;
         if (msg.type === 'edit' && typeof msg.value === 'string') {
-            const target: any = n.kind === 'folder' ? n.folder : n.kind === 'file' ? n.file : n.member;
+            const target: any = n.kind === 'folder' ? n.folder : n.kind === 'file' ? n.file : n.kind === 'group' ? n.group : n.member;
             if (!['name', 'title', 'description'].includes(msg.field)) return;
-            if (msg.field === 'name' && (n.kind !== 'folder' || !msg.value.trim())) return;
+            if (msg.field === 'name' && ((n.kind !== 'folder' && n.kind !== 'group') || !msg.value.trim())) return;
             target[msg.field] = msg.value;
             changed({ soon: true });
         } else if (msg.type === 'open') {
@@ -598,8 +709,9 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
 
     reg('addMembers', async (n?: Node) => {
         n = nodeArg(n);
-        if (n?.kind !== 'file' && n?.kind !== 'member') return;
+        if (n?.kind !== 'file' && n?.kind !== 'member' && n?.kind !== 'group') return;
         const file = n.file;
+        const intoGroup = n.kind === 'group' ? n.group : undefined;
         const isClass = /\.cls$/i.test(file.doc);
         const ws = folderFor(file.server, file.ns);
         const picks: { name: string; kind: string }[] = [];
@@ -634,6 +746,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         }
         if (!picks.length) return;
         const added = picks.map((p) => addMember(file, p.name, p.kind));
+        if (intoGroup) added.forEach((m) => (m.group = intoGroup.id));
         changed();
         await select(added[0].id);
     });
@@ -696,31 +809,126 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
 
     reg('open', (n?: Node) => openNode(nodeArg(n)));
 
-    reg('move', async (n?: Node) => {
+    reg('newGroup', async (n?: Node) => {
         n = nodeArg(n);
-        if (n?.kind === 'file') {
-            const from = n.folder;
-            const to = await pickFolder(`Move ${n.file.doc} to which folder?`, (f) => f !== from);
-            if (!to) return;
-            moveFile(n, to);
-        } else if (n?.kind === 'folder') {
-            const moving = n.folder;
-            const TOP = { label: '$(root-folder) Top level', folder: undefined as LogFolder | undefined };
-            const targets = allFolders().filter(({ folder }) => !isInside(folder, moving) && folder !== parentOf.get(moving));
-            const picked = await vscode.window.showQuickPick(
-                [
-                    ...(parentOf.get(moving) ? [TOP] : []),
-                    ...targets.map(({ folder, depth }) => ({ label: `${' '.repeat(depth)}$(folder) ${folder.name}`, folder: folder as LogFolder | undefined }))
-                ],
-                { placeHolder: `Move "${moving.name}" into which folder?`, ignoreFocusOut: true }
-            );
-            if (!picked) return;
-            moveFolder(n, picked.folder);
-        } else return;
-        const id = n.id;
+        if (!n || n.kind === 'folder') return;
+        const g = await createGroup(n.file);
+        if (!g) return;
         changed();
-        await select(id);
+        await select(g.id);
     });
+
+    reg('renameGroup', async (n?: Node) => {
+        n = nodeArg(n);
+        if (n?.kind !== 'group') return;
+        const name = await askGroupName('Rename group', n.group.name);
+        if (!name) return;
+        n.group.name = name;
+        changed();
+    });
+
+    reg('moveToGroup', async (n?: Node) => {
+        n = nodeArg(n);
+        if (n?.kind !== 'member') return;
+        const member = n.member;
+        const file = n.file;
+        const NEW = { label: '$(add) New group...', id: 'new' };
+        const NONE = { label: '$(circle-slash) No group', id: '' };
+        const picked = await vscode.window.showQuickPick(
+            [
+                ...file.groups.filter((g) => g.id !== member.group).map((g) => ({ label: `$(layers) ${g.name}`, id: g.id })),
+                ...(member.group ? [NONE] : []),
+                NEW
+            ],
+            { placeHolder: `Put ${member.name} in which group?`, ignoreFocusOut: true }
+        );
+        if (!picked) return;
+        let groupId = picked.id || undefined;
+        if (picked === NEW) {
+            const g = await createGroup(file);
+            if (!g) return;
+            groupId = g.id;
+        }
+        // To the end of its new list.
+        file.members.splice(file.members.indexOf(member), 1);
+        file.members.push(member);
+        setGroup(member, groupId);
+        changed();
+        await select(member.id);
+    });
+
+    /** Deep copy of a document entry, with fresh ids. */
+    const cloneFile = (f: LogFile): LogFile => {
+        const copy: LogFile = JSON.parse(JSON.stringify(f));
+        reIdFile(copy);
+        return copy;
+    };
+
+    /** Deep copy of a folder and everything in it, with fresh ids. */
+    const cloneFolder = (f: LogFolder): LogFolder => {
+        const copy: LogFolder = JSON.parse(JSON.stringify(f));
+        reId(copy);
+        return copy;
+    };
+
+    /**
+     * Move or copy a document or a (sub)folder. Projects (top-level
+     * folders) stay where they are: they aren't offered either action.
+     */
+    const relocate = async (n: Node | undefined, mode: 'move' | 'copy') => {
+        const verb = mode === 'move' ? 'Move' : 'Copy';
+        if (n?.kind === 'file') {
+            const file = n.file;
+            const from = n.folder;
+            const to = await pickFolder(
+                `${verb} ${file.doc} to which folder?`,
+                (f) => f !== from && !f.files.some((x) => sameDoc(x, file.server, file.ns, file.doc))
+            );
+            if (!to) return;
+            if (mode === 'move') {
+                moveFile(n, to);
+                changed();
+                await select(n.id);
+            } else {
+                const copy = cloneFile(file);
+                to.files.push(copy);
+                changed();
+                await select(copy.id);
+            }
+            return;
+        }
+        if (n?.kind !== 'folder' || !n.parent) return; // documents and subfolders only
+        const folder = n.folder;
+        const currentParent = parentOf.get(folder);
+        const TOP = { label: '$(root-folder) Top level (as a new project)', folder: undefined as LogFolder | undefined };
+        const targets = allFolders().filter(({ folder: f }) => !isInside(f, folder) && (mode === 'copy' || f !== currentParent));
+        const picked = await vscode.window.showQuickPick(
+            [
+                TOP,
+                ...targets.map(({ folder: f, depth }) => ({
+                    label: `${'\u2003'.repeat(depth)}$(${depth ? 'folder' : 'project'}) ${f.name}`,
+                    folder: f as LogFolder | undefined
+                }))
+            ],
+            { placeHolder: `${verb} "${folder.name}" into which folder?`, ignoreFocusOut: true }
+        );
+        if (!picked) return;
+        if (mode === 'move') {
+            moveFolder(n, picked.folder);
+            changed();
+            await select(n.id);
+            return;
+        }
+        const copy = cloneFolder(folder);
+        const siblings = picked.folder ? picked.folder.folders : data.folders;
+        if (siblings.some((f) => f.name === copy.name)) copy.name = `${copy.name} (copy)`;
+        siblings.push(copy);
+        changed();
+        await select(copy.id);
+    };
+
+    reg('move', (n?: Node) => relocate(nodeArg(n), 'move'));
+    reg('copy', (n?: Node) => relocate(nodeArg(n), 'copy'));
 
     reg('remove', async (n?: Node) => {
         n = nodeArg(n);
@@ -745,6 +953,19 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             );
             if (ok !== 'Remove') return;
             n.folder.files = n.folder.files.filter((x) => x !== (n as FileNode).file);
+        } else if (n.kind === 'group') {
+            const group = n.group;
+            const inside = n.file.members.filter((m) => m.group === group.id);
+            if (inside.length) {
+                const ok = await vscode.window.showWarningMessage(
+                    `Remove group "${group.name}"? Its ${inside.length} label(s) / method(s) stay in the document, ungrouped.`,
+                    { modal: true },
+                    'Remove group'
+                );
+                if (ok !== 'Remove group') return;
+            }
+            inside.forEach((m) => delete m.group);
+            n.file.groups = n.file.groups.filter((g) => g !== group);
         } else {
             const member = n.member;
             n.file.members = n.file.members.filter((m) => m !== member);
@@ -906,9 +1127,22 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
 function reId(f: LogFolder) {
     f.id = newId();
     f.folders.forEach(reId);
-    for (const file of f.files) {
-        file.id = newId();
-        for (const m of file.members) m.id = newId();
+    f.files.forEach(reIdFile);
+}
+
+/** New ids for a document entry, its groups and members (keeping members in their groups). */
+function reIdFile(file: LogFile) {
+    file.id = newId();
+    const map = new Map<string, string>();
+    for (const g of file.groups) {
+        const id = newId();
+        map.set(g.id, id);
+        g.id = id;
+    }
+    for (const m of file.members) {
+        m.id = newId();
+        if (m.group) m.group = map.get(m.group);
+        if (!m.group) delete m.group;
     }
 }
 
@@ -930,12 +1164,29 @@ function mergeFolders(target: LogFolder[], incoming: LogFolder[]) {
             }
             file.title ||= inFile.title;
             file.description ||= inFile.description;
+            // Groups merge by name; incoming members follow their group.
+            const groupMap = new Map<string, string>();
+            for (const inG of inFile.groups) {
+                const g = file.groups.find((x) => x.name === inG.name);
+                if (g) {
+                    g.description ||= inG.description;
+                    groupMap.set(inG.id, g.id);
+                } else {
+                    file.groups.push(inG);
+                    groupMap.set(inG.id, inG.id);
+                }
+            }
             for (const inM of inFile.members) {
                 const m = file.members.find((x) => x.name === inM.name);
-                if (!m) file.members.push(inM);
-                else {
+                const group = inM.group ? groupMap.get(inM.group) : undefined;
+                if (!m) {
+                    if (group) inM.group = group;
+                    else delete inM.group;
+                    file.members.push(inM);
+                } else {
                     m.title ||= inM.title;
                     m.description ||= inM.description;
+                    if (!m.group && group) m.group = group;
                 }
             }
         }
@@ -952,7 +1203,7 @@ function escapeMd(s: string): string {
 
 interface NodeView {
     id: string;
-    kind: 'folder' | 'file' | 'member';
+    kind: 'folder' | 'file' | 'group' | 'member';
     /** Read-only context, top to bottom: namespace, folder path, document, member. */
     context: { label: string; value: string; mono?: boolean }[];
     fields: { key: 'name' | 'title' | 'description'; label: string; value: string; multiline: boolean }[];
@@ -980,7 +1231,22 @@ function describeNode(n: Node, pathOf: (f: LogFolder) => string[]): NodeView {
         { label: 'Folder', value: pathOf(n.folder).join(' › ') },
         { label: 'Document', value: n.file.doc, mono: true }
     ];
-    if (n.kind === 'member') ctx.push({ label: n.member.kind, value: n.member.name, mono: true });
+    if (n.kind === 'group') {
+        return {
+            id: n.id,
+            kind: 'group',
+            context: ctx,
+            fields: [
+                { key: 'name', label: 'Group name', value: n.group.name, multiline: false },
+                { key: 'description', label: 'Description', value: n.group.description, multiline: true }
+            ],
+            canOpen: false
+        };
+    }
+    if (n.kind === 'member') {
+        if (n.group) ctx.push({ label: 'Group', value: n.group.name });
+        ctx.push({ label: n.member.kind, value: n.member.name, mono: true });
+    }
     const target = n.kind === 'file' ? n.file : n.member;
     return {
         id: n.id,
@@ -1117,7 +1383,7 @@ class DetailsView implements vscode.WebviewViewProvider {
             root.append(el('div', { className: 'field' }, el('span', { className: 'k', textContent: f.label }), input));
         }
         const actions = el('div', { className: 'actions' });
-        if (node.kind !== 'folder') {
+        if (node.kind === 'file' || node.kind === 'member') {
             const open = el('button', { textContent: 'Go to code \\u2192', disabled: !node.canOpen });
             open.addEventListener('click', () => vscode.postMessage({ type: 'open', id: node.id }));
             actions.append(open);
