@@ -172,19 +172,47 @@ A document with many logged labels / methods can be organised into **groups**:
   create a new group). Members not in a group are listed after the groups.
 - Drag members onto each other to reorder them, onto a group to join it, or onto the document to take them out of their group.
   Drag groups onto each other to reorder groups. Members stay within their own document.
-- **+** on a group adds labels / methods straight into it. Each group shows a count badge and collapses like a folder.
+- **Choose Members** (the checklist icon on a group) lists the labels / methods you've already logged in that document:
+  ticked ones are in the group. Tick to add, untick to take out (they stay logged, just ungrouped). Members in another
+  group are marked "· in …"; ticking one moves it here. The last entry, **Add labels / methods not logged yet...**,
+  picks new ones from the source straight into the group.
+- Each group shows a count badge and collapses like a folder.
 - Removing a group keeps its members: they just become ungrouped.
+
+**Expanding and collapsing**
+
+The Code Log opens with everything collapsed. Open rows one level at a time with their arrow. Closing a row also
+closes everything inside it, so the next time you open it you see one clean level. The title-bar **Collapse All**
+folds the whole tree.
 
 **Details panel**
 
-Select anything in the tree to see it in **Details** below: its namespace, folder path, document (and method), then its
-title and description, which you edit there. Changes save as you type.
-Text direction follows what you type, so Hebrew works as expected.
+The tree is for organising and quick access; the log itself lives in **Details** below it, which has two tabs.
+
+*Overview* shows the whole log as a status tree. Each document and label / method shows its status dot, title and open
+to-dos; projects and folders roll up a small status bar and a count of open to-dos (☐). Filter by status with the
+chips, by **☐ open to-dos**, or by **#tag**. Parents of a match stay visible. Click a row to open it in the Item tab.
+
+*Item* shows the entry you selected in the tree (selecting switches to this tab):
+
+- **Header**: the path, an editable **title**, the **status** (click the badge: To check, In progress, OK, Needs fix,
+  or none), a link that opens the code, and the **tags**. **+ tag** adds one (existing tags are suggested),
+  ✕ removes it, and double-clicking a tag renames it everywhere in the log.
+- **Notes**: click to edit. Supports `- ` / `* ` bullets, `1. ` numbered lists, `` `code` `` and `**bold**`.
+- **Journal**: dated entries, newest first. Edit or delete (with undo) from the entry's hover buttons.
+- **To-do**: add, tick, edit, drag to reorder, delete (with undo). Done items move to their own section.
+- **Info**: clickable **Document** and **Method** cards that open the code, then group, folder, namespace, server
+  (open / not open in your workspace), added and last edited.
+
+Status, tags, journal and to-dos are for documents and labels / methods. Projects, folders and groups have a name
+and notes only.
+
+Changes save as you type. Text direction follows what you type, so Hebrew works as expected.
 
 **Going to the code**
 
-The **Go to code** arrow on a row (or button in Details) opens the document, or the document at that label or method.
-Members are found by **name** when you click, so they still work after the code is edited.
+The **Go to code** arrow on a row (or the link / cards in Details) opens the document, or the document at that label
+or method. Members are found by **name** when you click, so they still work after the code is edited.
 This only works while that server and namespace is open in your workspace. Otherwise the entry is greyed out and
 marked "(not open)", but it stays in the log.
 
@@ -194,18 +222,25 @@ Top-level folders are **projects**. They have their own icon and an emphasised n
 
 **Saving, export and import**
 
-The log is saved in VS Code on this computer.
+The log is saved in VS Code on this computer. There are two kinds of export:
+
+*Tree export / import* (Code Log title bar and project rows) carries the structure plus **titles and notes** only.
 
 - **Export** in the title bar saves the whole log as a JSON file.
 - **Export Project** (the export icon on a project row, or right-click) saves just that project with its subfolders.
-  Subfolders can't be exported on their own.
 - **Import** in the title bar reads either kind of file:
-  - a **project** you don't have yet is simply added;
-  - a project with the same name as one of yours offers **Merge**, **Replace** (just that project) or **Add as a copy**;
-  - a file with **several projects** (e.g. a whole-log export) shows a checklist of its projects, all ticked, each
-    marked *new* or *already exists*. Untick any you don't want. If some ticked ones already exist, a second list asks
-    which to **overwrite**; unticked ones are **merged** into yours. New ones are added, and projects that aren't in
-    the file are never touched.
+  - a **single project** shows a checklist of its subfolders and documents, all ticked, each marked *new* or
+    *already exists*. Untick what you don't want. If some ticked ones already exist, a second list asks which to
+    **replace**; unticked ones are **merged** into yours;
+  - a file with **several projects** (e.g. a whole-log export) shows the same kind of checklist for its projects.
+  - Replacing never loses your status, tags, journal or to-dos on documents that stay; those come only from a log
+    export.
+
+*Log export / import* (the Details panel title bar) carries everything: title, notes, status, tags, journal and to-dos.
+
+- **Export Log** asks for **all projects** or **one project**.
+- **Import Log** creates any missing projects, folders, documents, groups and labels / methods in the tree. If some
+  items already have a log of their own, it asks once: **Overwrite all**, **Keep mine**, or **Choose…** (a checklist).
 
 Export and import dialogs open on your Desktop and save to / read from your own computer.
 

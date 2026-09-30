@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { chooseDocuments, docNameToUri } from './docPicker';
 import { findLabelLine } from './goto';
+import { CodeLogView } from './codeLogView';
 
 // ---------------------------------------------------------------------------
 // Code Log: your own notes about server-side code, organised in folders.
@@ -23,7 +24,35 @@ import { findLabelLine } from './goto';
 
 type Logger = (message: string) => void;
 
-interface LogMember {
+export type Status = 'check' | 'progress' | 'ok' | 'fix';
+export const STATUSES: Status[] = ['check', 'progress', 'ok', 'fix'];
+
+export interface JournalEntry {
+    id: string;
+    at: string; // ISO date/time
+    text: string;
+}
+
+export interface Todo {
+    id: string;
+    text: string;
+    done: boolean;
+}
+
+/**
+ * The "code log" of a document or member: working notes that live in the
+ * Details panel. (Title and notes are shared with the tree.)
+ */
+export interface Work {
+    status?: Status;
+    tags: string[];
+    journal: JournalEntry[];
+    todos: Todo[];
+    created?: string; // ISO
+    edited?: string; // ISO
+}
+
+interface LogMember extends Work {
     id: string;
     name: string;
     kind: string; // Label, ClassMethod, Method, Query, ...
@@ -40,7 +69,7 @@ interface LogGroup {
     description: string;
 }
 
-interface LogFile {
+interface LogFile extends Work {
     id: string;
     server: string;
     ns: string;
@@ -199,9 +228,60 @@ function normalizeFolder(f: any): LogFolder {
             doc: x.doc,
             title: x.title || '',
             description: x.description || '',
+            ...normalizeWork(x),
             ...normalizeMembers(x)
         }))
     };
+}
+
+/** Status / tags / journal / to-dos / dates, with safe defaults (older logs have none). */
+export function normalizeWork(x: any): Work {
+    const iso = (v: any) => (typeof v === 'string' && !isNaN(Date.parse(v)) ? v : undefined);
+    const tags = Array.isArray(x?.tags) ? x.tags.filter((t: any) => typeof t === 'string' && t.trim()).map(normalizeTag) : [];
+    return {
+        ...(STATUSES.includes(x?.status) ? { status: x.status as Status } : {}),
+        tags: [...new Set<string>(tags)],
+        journal: (Array.isArray(x?.journal) ? x.journal : [])
+            .filter((j: any) => typeof j?.text === 'string')
+            .map((j: any) => ({ id: j.id || newId(), at: iso(j.at) || new Date().toISOString(), text: j.text })),
+        todos: (Array.isArray(x?.todos) ? x.todos : [])
+            .filter((t: any) => typeof t?.text === 'string')
+            .map((t: any) => ({ id: t.id || newId(), text: t.text, done: !!t.done })),
+        ...(iso(x?.created) ? { created: iso(x.created) } : {}),
+        ...(iso(x?.edited) ? { edited: iso(x.edited) } : {})
+    };
+}
+
+/** "#Customers " -> "#Customers"; "new tag" -> "#new-tag". */
+export function normalizeTag(t: string): string {
+    const clean = t.trim().replace(/^#+/, '').replace(/\s+/g, '-');
+    return clean ? '#' + clean : '';
+}
+
+export function emptyWork(): Work {
+    const now = new Date().toISOString();
+    return { tags: [], journal: [], todos: [], created: now, edited: now };
+}
+
+/** Anything written in the Details panel beyond an empty entry? */
+export function hasDetails(x: { title: string; description: string } & Work): boolean {
+    return !!(x.title || x.description || x.status || x.tags.length || x.journal.length || x.todos.length);
+}
+
+/** Drops status / tags / journal / to-dos (tree exports carry only titles and notes). */
+export function stripWork(f: LogFolder): LogFolder {
+    const clear = (w: any) => {
+        delete w.status;
+        w.tags = [];
+        w.journal = [];
+        w.todos = [];
+    };
+    f.folders.forEach(stripWork);
+    for (const file of f.files) {
+        clear(file);
+        file.members.forEach(clear);
+    }
+    return f;
 }
 
 /** Groups and members of a document; a member pointing at a missing group becomes ungrouped. */
@@ -216,6 +296,7 @@ function normalizeMembers(x: any): { groups: LogGroup[]; members: LogMember[] } 
         kind: m.kind || 'Label',
         title: m.title || '',
         description: m.description || '',
+        ...normalizeWork(m),
         ...(m.group && ids.has(m.group) ? { group: m.group } : {})
     }));
     return { groups, members };
@@ -281,6 +362,20 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
 
     const siblingsOf = (folder: LogFolder): LogFolder[] => parentOf.get(folder)?.folders ?? data.folders;
 
+    // ---- expand / collapse ----
+    // Closing a row also closes everything inside it, so reopening shows one
+    // clean level. VS Code can't collapse a given row from code, so the rows
+    // inside get a new tree id (an epoch suffix) and a collapsed state: VS Code
+    // treats them as new rows and uses that state.
+    const forcedState = new Map<string, vscode.TreeItemCollapsibleState>();
+    const epochs = new Map<string, number>();
+    const itemId = (n: Node) => (epochs.get(n.id) ? `${n.id}~${epochs.get(n.id)}` : n.id);
+    const childrenOf = (n: Node): Node[] => (provider.getChildren(n) as Node[]) ?? [];
+    const hasChildren = (n: Node) => childrenOf(n).length > 0;
+    /** Everything starts collapsed; rows without children have no arrow. */
+    const stateFor = (n: Node) =>
+        !hasChildren(n) ? vscode.TreeItemCollapsibleState.None : forcedState.get(n.id) ?? vscode.TreeItemCollapsibleState.Collapsed;
+
     // ---- tree ----
     const treeChanged = new vscode.EventEmitter<Node | undefined | void>();
     const provider: vscode.TreeDataProvider<Node> = {
@@ -310,15 +405,15 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 const name = isolate(n.folder.name);
                 const item = new vscode.TreeItem(
                     isProject ? { label: name, highlights: [[0, name.length]] } : name,
-                    empty ? vscode.TreeItemCollapsibleState.None : vscode.TreeItemCollapsibleState.Expanded
+                    stateFor(n)
                 );
-                item.id = n.id;
+                item.id = itemId(n);
                 item.iconPath = new vscode.ThemeIcon(isProject ? 'project' : 'folder');
                 // File count as a right-aligned badge (see the decoration provider).
                 item.resourceUri = vscode.Uri.from({ scheme: DECO_SCHEME, path: '/' + n.id });
                 if (empty) item.description = 'empty';
                 item.tooltip = [pathOf(n.folder).join(' › '), n.folder.description].filter(Boolean).join('\n\n');
-                item.contextValue = isProject ? 'logProject' : 'logFolder';
+                item.contextValue = (isProject ? 'logProject' : 'logFolder');
                 return item;
             }
             if (n.kind === 'file') {
@@ -326,9 +421,9 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 // Title as the main text when there is one; the document name next to it.
                 const item = new vscode.TreeItem(
                     isolate(n.file.title || n.file.doc),
-                    n.file.members.length || n.file.groups.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+                    stateFor(n)
                 );
-                item.id = n.id;
+                item.id = itemId(n);
                 const icon = /\.cls$/i.test(n.file.doc) ? 'symbol-class' : 'file-code';
                 item.iconPath = open ? new vscode.ThemeIcon(icon) : new vscode.ThemeIcon(icon, new vscode.ThemeColor('disabledForeground'));
                 item.description = isolateLtr([open ? '' : '(not open)', n.file.title ? n.file.doc : ''].filter(Boolean).join(' '));
@@ -338,16 +433,16 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 md.appendMarkdown(`\`${escapeMd(n.file.doc)}\` · ${escapeMd(n.file.ns)} on ${escapeMd(n.file.server)}`);
                 if (!open) md.appendMarkdown(`\n\n_Namespace ${escapeMd(n.file.ns)} on ${escapeMd(n.file.server)} isn't open in this workspace._`);
                 item.tooltip = md;
-                item.contextValue = open ? 'logFile' : 'logFileClosed';
+                item.contextValue = (open ? 'logFile' : 'logFileClosed');
                 return item;
             }
             if (n.kind === 'group') {
                 const count = n.file.members.filter((m) => m.group === n.group.id).length;
                 const item = new vscode.TreeItem(
                     isolate(n.group.name),
-                    count ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None
+                    stateFor(n)
                 );
-                item.id = n.id;
+                item.id = itemId(n);
                 item.iconPath = new vscode.ThemeIcon('layers');
                 item.resourceUri = vscode.Uri.from({ scheme: DECO_SCHEME, path: '/' + n.id }); // count badge
                 if (!count) item.description = 'empty';
@@ -357,7 +452,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             }
             const open = !!folderFor(n.file.server, n.file.ns);
             const item = new vscode.TreeItem(isolate(n.member.title || n.member.name), vscode.TreeItemCollapsibleState.None);
-            item.id = n.id;
+            item.id = itemId(n);
             const icon = n.member.kind === 'Label' ? 'symbol-function' : 'symbol-method';
             item.iconPath = open ? new vscode.ThemeIcon(icon) : new vscode.ThemeIcon(icon, new vscode.ThemeColor('disabledForeground'));
             item.description = n.member.title ? isolateLtr(n.member.name) : '';
@@ -401,6 +496,26 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     });
     context.subscriptions.push(tree, treeChanged);
 
+    context.subscriptions.push(
+        tree.onDidCollapseElement((e) => {
+            const closed = e.element;
+            let changedAny = false;
+            const walk = (x: Node) => {
+                for (const c of childrenOf(x)) {
+                    if (!hasChildren(c)) continue;
+                    forcedState.set(c.id, vscode.TreeItemCollapsibleState.Collapsed);
+                    epochs.set(c.id, (epochs.get(c.id) ?? 0) + 1);
+                    changedAny = true;
+                    walk(c);
+                }
+            };
+            walk(closed);
+            if (changedAny) treeChanged.fire(closed);
+        }),
+        // Opening a row by hand: it stays open after later refreshes.
+        tree.onDidExpandElement((e) => forcedState.set(e.element.id, vscode.TreeItemCollapsibleState.Expanded))
+    );
+
     // ---- folder file-count badges ----
     const decoChanged = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>();
     context.subscriptions.push(
@@ -423,15 +538,19 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         })
     );
 
-    // ---- details panel ----
-    const details = new DetailsView((msg) => onDetailsMessage(msg));
-    context.subscriptions.push(vscode.window.registerWebviewViewProvider(DETAILS_ID, details));
+    // ---- details panel (Overview + Item) ----
+    const details = new CodeLogView(
+        context.extensionUri,
+        (msg) => onViewMessage(msg).catch((e: any) => log(`Code Log details: ${e?.message || e}`)),
+        () => buildState()
+    );
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(DETAILS_ID, details, { webviewOptions: { retainContextWhenHidden: true } }));
     let selected: Node | undefined;
-    const showDetails = () => details.show(selected ? describeNode(selected, pathOf) : undefined);
+    const showDetails = (reason: 'selection' | 'update' = 'update') => details.show(buildState(), reason);
     context.subscriptions.push(
         tree.onDidChangeSelection((e) => {
             selected = e.selection[0];
-            showDetails();
+            showDetails('selection');
         })
     );
 
@@ -466,7 +585,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             // view not visible yet
         }
         selected = n;
-        showDetails();
+        showDetails('selection');
     };
 
     // ---- helpers ----
@@ -518,7 +637,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     const addFile = (folder: LogFolder, server: string, ns: string, doc: string): LogFile => {
         const existing = folder.files.find((x) => sameDoc(x, server, ns, doc));
         if (existing) return existing;
-        const file: LogFile = { id: newId(), server, ns: ns.toUpperCase(), doc, title: '', description: '', groups: [], members: [] };
+        const file: LogFile = { id: newId(), server, ns: ns.toUpperCase(), doc, title: '', description: '', groups: [], members: [], ...emptyWork() };
         folder.files.push(file);
         return file;
     };
@@ -526,7 +645,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     const addMember = (file: LogFile, name: string, kind: string, title = ''): LogMember => {
         const existing = file.members.find((m) => m.name === name);
         if (existing) return existing;
-        const member: LogMember = { id: newId(), name, kind, title, description: '' };
+        const member: LogMember = { id: newId(), name, kind, title, description: '', ...emptyWork() };
         file.members.push(member);
         return member;
     };
@@ -645,19 +764,173 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             ignoreFocusOut: true
         });
 
-    // ---- details panel messages ----
-    const onDetailsMessage = (msg: any) => {
-        const n = msg?.id ? nodes.get(msg.id) : undefined;
-        if (!n) return;
-        if (msg.type === 'edit' && typeof msg.value === 'string') {
-            const target: any = n.kind === 'folder' ? n.folder : n.kind === 'file' ? n.file : n.kind === 'group' ? n.group : n.member;
-            if (!['name', 'title', 'description'].includes(msg.field)) return;
-            if (msg.field === 'name' && ((n.kind !== 'folder' && n.kind !== 'group') || !msg.value.trim())) return;
-            target[msg.field] = msg.value;
-            changed({ soon: true });
-        } else if (msg.type === 'open') {
-            openNode(n);
+    // ---- details panel: state ----
+    const countMembers = (f: LogFolder): number =>
+        f.files.reduce((n, x) => n + x.members.length, 0) + f.folders.reduce((n, sub) => n + countMembers(sub), 0);
+
+    /** Everything the Details page needs: the selected item and the whole log for the Overview. */
+    const buildState = () => {
+        const tagCounts = new Map<string, number>();
+        const work = (w: Work & { title: string; description: string }) => {
+            w.tags.forEach((t) => tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1));
+            const open = w.todos.filter((t) => !t.done);
+            return { status: w.status, tags: w.tags, openTodos: open.length, todoTexts: open.slice(0, 6).map((t) => t.text), title: w.title, notes: w.description };
+        };
+        const ovMember = (m: LogMember) => ({ id: m.id, kind: 'member', label: m.title || m.name, sub: m.title ? m.name : undefined, ...work(m) });
+        const ovFile = (x: LogFile) => ({
+            id: x.id, kind: 'file', label: x.title || x.doc, sub: x.title ? x.doc : undefined, ...work(x),
+            children: [
+                ...x.groups.map((g) => ({ id: g.id, kind: 'group', label: g.name, notes: g.description, children: x.members.filter((m) => m.group === g.id).map(ovMember) })),
+                ...x.members.filter((m) => !m.group).map(ovMember)
+            ]
+        });
+        const ovFolder = (f: LogFolder, project: boolean): any => ({
+            id: f.id, kind: 'folder', label: f.name, project, notes: f.description,
+            children: [...f.folders.map((x) => ovFolder(x, false)), ...f.files.map(ovFile)]
+        });
+        const projects = data.folders.map((f) => ovFolder(f, true));
+        return {
+            selected: selected ? detailOf(selected) : null,
+            projects,
+            tags: [...tagCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([tag, count]) => ({ tag, count }))
+        };
+    };
+
+    const detailOf = (n: Node) => {
+        if (n.kind === 'folder') {
+            return {
+                id: n.id, kind: 'folder', work: false, name: n.folder.name, description: n.folder.description, isProject: !n.parent,
+                path: pathOf(n.folder).slice(0, -1), counts: { docs: countFiles(n.folder), members: countMembers(n.folder) }
+            };
         }
+        if (n.kind === 'group') {
+            return {
+                id: n.id, kind: 'group', work: false, name: n.group.name, description: n.group.description, doc: n.file.doc,
+                path: [...pathOf(n.folder), n.file.doc], counts: { members: n.file.members.filter((m) => m.group === n.group.id).length }
+            };
+        }
+        const w = n.kind === 'file' ? n.file : n.member;
+        const group = n.kind === 'member' && n.member.group ? n.file.groups.find((g) => g.id === n.member.group)?.name : undefined;
+        return {
+            id: n.id, kind: n.kind, work: true, title: w.title, description: w.description,
+            status: w.status, tags: w.tags, journal: w.journal, todos: w.todos, created: w.created, edited: w.edited,
+            doc: n.file.doc, docType: /\.cls$/i.test(n.file.doc) ? 'cls' : 'rtn',
+            member: n.kind === 'member' ? { name: n.member.name, kind: n.member.kind } : undefined,
+            group, ns: n.file.ns, server: n.file.server, nsOpen: !!folderFor(n.file.server, n.file.ns),
+            path: pathOf(n.folder)
+        };
+    };
+
+    // ---- details panel: edits ----
+    const onViewMessage = async (msg: any) => {
+        const n = typeof msg?.id === 'string' ? nodes.get(msg.id) : undefined;
+        if (msg?.type === 'select') {
+            await select(msg.id);
+            return;
+        }
+        if (!n) return;
+        if (msg.type === 'open') {
+            if (n.kind === 'folder' || n.kind === 'group') return;
+            await openNode(msg.target === 'file' ? nodes.get(n.file.id) : n);
+            return;
+        }
+        const w: Work | undefined = n.kind === 'file' ? n.file : n.kind === 'member' ? n.member : undefined;
+        const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+        switch (msg.type) {
+            case 'edit': {
+                if (typeof msg.value !== 'string') return;
+                const target: any = n.kind === 'folder' ? n.folder : n.kind === 'group' ? n.group : n.kind === 'file' ? n.file : n.member;
+                if (msg.field === 'name') {
+                    if ((n.kind !== 'folder' && n.kind !== 'group') || !msg.value.trim()) return;
+                } else if (msg.field === 'title') {
+                    if (!w) return;
+                } else if (msg.field !== 'description') return;
+                target[msg.field] = msg.value;
+                if (w) w.edited = new Date().toISOString();
+                changed({ soon: true });
+                return;
+            }
+            case 'setStatus':
+                if (!w) return;
+                if (STATUSES.includes(msg.status)) w.status = msg.status;
+                else delete w.status;
+                break;
+            case 'addTag': {
+                const t = normalizeTag(String(msg.tag ?? ''));
+                if (!w || !t || w.tags.includes(t)) return;
+                w.tags.push(t);
+                break;
+            }
+            case 'removeTag':
+                if (!w) return;
+                w.tags = w.tags.filter((t) => t !== msg.tag);
+                break;
+            case 'renameTag': {
+                if (!w) return;
+                const t = normalizeTag(String(msg.to ?? ''));
+                w.tags = [...new Set(w.tags.map((x) => (x === msg.from ? t : x)).filter(Boolean))];
+                break;
+            }
+            case 'addJournal':
+                if (!w || !text) return;
+                w.journal.push({ id: newId(), at: new Date().toISOString(), text });
+                break;
+            case 'editJournal': {
+                const j = w?.journal.find((x) => x.id === msg.entryId);
+                if (!j || !text) return;
+                j.text = text;
+                break;
+            }
+            case 'deleteJournal':
+                if (!w) return;
+                w.journal = w.journal.filter((x) => x.id !== msg.entryId);
+                break;
+            case 'restoreJournal': {
+                const e = normalizeWork({ journal: [msg.entry] }).journal[0];
+                if (!w || !e || w.journal.some((x) => x.id === e.id)) return;
+                w.journal.splice(Math.min(Math.max(0, msg.index | 0), w.journal.length), 0, e);
+                break;
+            }
+            case 'addTodo':
+                if (!w || !text) return;
+                w.todos.push({ id: newId(), text, done: false });
+                break;
+            case 'editTodo': {
+                const t = w?.todos.find((x) => x.id === msg.todoId);
+                if (!t || !text) return;
+                t.text = text;
+                break;
+            }
+            case 'toggleTodo': {
+                const t = w?.todos.find((x) => x.id === msg.todoId);
+                if (!t) return;
+                t.done = !t.done;
+                break;
+            }
+            case 'deleteTodo':
+                if (!w) return;
+                w.todos = w.todos.filter((x) => x.id !== msg.todoId);
+                break;
+            case 'restoreTodo': {
+                const t = normalizeWork({ todos: [msg.todo] }).todos[0];
+                if (!w || !t || w.todos.some((x) => x.id === t.id)) return;
+                w.todos.splice(Math.min(Math.max(0, msg.index | 0), w.todos.length), 0, t);
+                break;
+            }
+            case 'moveTodo': {
+                if (!w) return;
+                const from = w.todos.findIndex((x) => x.id === msg.todoId);
+                if (from < 0) return;
+                const [t] = w.todos.splice(from, 1);
+                const to = w.todos.findIndex((x) => x.id === msg.beforeId);
+                w.todos.splice(to < 0 ? w.todos.length : to, 0, t);
+                break;
+            }
+            default:
+                return;
+        }
+        if (w) w.edited = new Date().toISOString();
+        changed();
     };
 
     // ---- commands ----
@@ -707,11 +980,8 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         await select(added[0]?.id);
     });
 
-    reg('addMembers', async (n?: Node) => {
-        n = nodeArg(n);
-        if (n?.kind !== 'file' && n?.kind !== 'member' && n?.kind !== 'group') return;
-        const file = n.file;
-        const intoGroup = n.kind === 'group' ? n.group : undefined;
+    /** Adds labels / methods not logged yet, picked from the document's source (or typed). */
+    const addNewMembers = async (file: LogFile, intoGroup?: LogGroup) => {
         const isClass = /\.cls$/i.test(file.doc);
         const ws = folderFor(file.server, file.ns);
         const picks: { name: string; kind: string }[] = [];
@@ -727,7 +997,11 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                             .map((m) => ({ label: m.name, description: `${m.kind} · line ${m.line + 1}`, m })),
                         { label: '$(edit) Type a name...', description: '', m: undefined }
                     ],
-                    { canPickMany: true, placeHolder: `Which ${isClass ? 'methods' : 'labels'} of ${file.doc}?`, ignoreFocusOut: true }
+                    {
+                        canPickMany: true,
+                        placeHolder: `Which ${isClass ? 'methods' : 'labels'} of ${file.doc} to log${intoGroup ? ` in "${intoGroup.name}"` : ''}?`,
+                        ignoreFocusOut: true
+                    }
                 );
                 if (!chosen?.length) return;
                 for (const c of chosen) if (c.m) picks.push({ name: c.m.name, kind: c.m.kind });
@@ -749,6 +1023,61 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         if (intoGroup) added.forEach((m) => (m.group = intoGroup.id));
         changed();
         await select(added[0].id);
+    };
+
+    /**
+     * + on a group: tick which of the document's logged members belong in it
+     * (unticking takes them out, they stay logged). The last entry adds members
+     * not logged yet, straight into the group.
+     */
+    const chooseGroupMembers = async (file: LogFile, group: LogGroup) => {
+        const groupName = (id?: string) => file.groups.find((g) => g.id === id)?.name;
+        type Item = vscode.QuickPickItem & { m?: LogMember; addNew?: boolean };
+        const items: Item[] = file.members.map((m) => {
+            const elsewhere = m.group && m.group !== group.id ? groupName(m.group) : undefined;
+            return {
+                label: m.title || m.name,
+                description: [m.title ? m.name : '', elsewhere ? `· in ${elsewhere}` : ''].filter(Boolean).join(' '),
+                picked: m.group === group.id,
+                m
+            };
+        });
+        items.push({ label: '$(add) Add labels / methods not logged yet...', description: `from ${file.doc}`, addNew: true });
+        const chosen = await vscode.window.showQuickPick(items, {
+            canPickMany: true,
+            placeHolder: `Which logged members belong in "${group.name}"? (ticked = in the group)`,
+            matchOnDescription: true,
+            ignoreFocusOut: true
+        });
+        if (!chosen) return;
+        const inGroup = new Set(chosen.filter((c) => c.m).map((c) => c.m!));
+        let changes = 0;
+        for (const m of file.members) {
+            if (inGroup.has(m) && m.group !== group.id) {
+                m.group = group.id; // joins (or moves here from another group)
+                changes++;
+            } else if (!inGroup.has(m) && m.group === group.id) {
+                delete m.group; // unticked: ungrouped, still logged
+                changes++;
+            }
+        }
+        if (changes) {
+            changed();
+            await select(group.id);
+        }
+        if (chosen.some((c) => c.addNew)) await addNewMembers(file, group);
+    };
+
+    reg('chooseGroupMembers', async (n?: Node) => {
+        n = nodeArg(n);
+        if (n?.kind === 'group') await chooseGroupMembers(n.file, n.group);
+    });
+
+    reg('addMembers', async (n?: Node) => {
+        n = nodeArg(n);
+        if (n?.kind === 'group') return chooseGroupMembers(n.file, n.group);
+        if (n?.kind !== 'file' && n?.kind !== 'member') return;
+        return addNewMembers(n.file);
     });
 
     reg('addFromEditor', async (uri?: vscode.Uri) => {
@@ -986,7 +1315,11 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     };
 
     reg('export', async () => {
-        const target = await saveJson('Export Code Log', 'code-log.json', { ...data, scope: 'log' });
+        const target = await saveJson('Export Code Log', 'code-log.json', {
+            version: 2,
+            scope: 'log',
+            folders: data.folders.map((f) => stripWork(cloneFolderRaw(f)))
+        });
         if (target) vscode.window.showInformationMessage(`Code Log exported to ${target.fsPath}.`);
     });
 
@@ -998,10 +1331,308 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         const target = await saveJson(`Export project "${n.folder.name}"`, `${safeName}.json`, {
             version: 2,
             scope: 'project',
-            folders: [n.folder]
+            folders: [stripWork(cloneFolderRaw(n.folder))]
         });
         if (target) vscode.window.showInformationMessage(`Project "${n.folder.name}" exported to ${target.fsPath}.`);
     });
+
+    // ---- log (Details) export / import ----
+    // A separate file with each document's / member's full log (title, notes,
+    // status, tags, journal, to-dos) and where it sits. Importing creates
+    // anything missing in the tree, and asks before overwriting existing logs.
+
+    type LogItem = {
+        path: string[];
+        server: string;
+        ns: string;
+        doc: string;
+        member?: { name: string; kind: string };
+        group?: string;
+        title: string;
+        description: string;
+    } & Work;
+
+    reg('exportLog', async () => {
+        if (!data.folders.length) {
+            vscode.window.showInformationMessage('The Code Log is empty: nothing to export.');
+            return;
+        }
+        const pick = await vscode.window.showQuickPick(
+            [
+                { label: '$(root-folder) All projects', f: undefined as LogFolder | undefined },
+                ...data.folders.map((f) => ({ label: `$(project) ${f.name}`, f: f as LogFolder | undefined }))
+            ],
+            { placeHolder: 'Export the log of…', ignoreFocusOut: true }
+        );
+        if (!pick) return;
+        const items: LogItem[] = [];
+        const workOf = (w: Work & { title: string; description: string }) => ({
+            title: w.title, description: w.description, ...(w.status ? { status: w.status } : {}),
+            tags: w.tags, journal: w.journal, todos: w.todos, created: w.created, edited: w.edited
+        });
+        const walk = (f: LogFolder, parentPath: string[]) => {
+            const p = [...parentPath, f.name];
+            for (const file of f.files) {
+                const where = { path: p, server: file.server, ns: file.ns, doc: file.doc };
+                items.push({ ...where, ...workOf(file) });
+                for (const m of file.members) {
+                    const group = m.group ? file.groups.find((g) => g.id === m.group)?.name : undefined;
+                    items.push({ ...where, member: { name: m.name, kind: m.kind }, ...(group ? { group } : {}), ...workOf(m) });
+                }
+            }
+            f.folders.forEach((sub) => walk(sub, p));
+        };
+        (pick.f ? [pick.f] : data.folders).forEach((f) => walk(f, []));
+        const base = pick.f ? pick.f.name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'project' : 'code-log';
+        const target = await saveJson('Export Log', `${base}-log.json`, {
+            format: LOG_FORMAT,
+            version: 1,
+            exported: new Date().toISOString(),
+            scope: pick.f ? pick.f.name : 'all',
+            items
+        });
+        if (target) vscode.window.showInformationMessage(`Log exported (${items.length} item(s)) to ${target.fsPath}.`);
+    });
+
+    reg('importLog', async () => {
+        const picked = await vscode.window.showOpenDialog({
+            title: 'Import Log',
+            defaultUri: vscode.Uri.file(desktopDir()),
+            canSelectMany: false,
+            filters: { JSON: ['json'] }
+        });
+        if (!picked?.[0]) return;
+        let items: LogItem[];
+        try {
+            const parsed = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(picked[0])).toString('utf8'));
+            if (parsed?.format !== LOG_FORMAT) {
+                throw new Error(isValidData(parsed) ? 'this is a Code Log tree export - use Import in the Code Log title bar' : 'not a Log export');
+            }
+            items = (Array.isArray(parsed.items) ? parsed.items : [])
+                .filter((it: any) =>
+                    Array.isArray(it?.path) && it.path.length && it.path.every((x: any) => typeof x === 'string' && x) &&
+                    typeof it.server === 'string' && typeof it.ns === 'string' && typeof it.doc === 'string' &&
+                    (it.member === undefined || typeof it.member?.name === 'string'))
+                .map((it: any) => ({
+                    path: it.path, server: it.server, ns: String(it.ns).toUpperCase(), doc: it.doc,
+                    ...(it.member ? { member: { name: it.member.name, kind: it.member.kind || 'Label' } } : {}),
+                    ...(typeof it.group === 'string' && it.group ? { group: it.group } : {}),
+                    title: typeof it.title === 'string' ? it.title : '',
+                    description: typeof it.description === 'string' ? it.description : '',
+                    ...normalizeWork(it)
+                }));
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Couldn't import ${picked[0].fsPath}: ${e?.message || e}`);
+            return;
+        }
+        if (!items.length) {
+            vscode.window.showInformationMessage('That file has no log entries.');
+            return;
+        }
+
+        // 1. What already exists here (nothing is created yet)?
+        const findFolder = (p: string[]) => {
+            let list = data.folders;
+            let f: LogFolder | undefined;
+            for (const name of p) {
+                f = list.find((x) => x.name === name);
+                if (!f) return undefined;
+                list = f.folders;
+            }
+            return f;
+        };
+        const findTarget = (it: LogItem): (LogFile | LogMember) | undefined => {
+            const file = findFolder(it.path)?.files.find((x) => sameDoc(x, it.server, it.ns, it.doc));
+            if (!file || !it.member) return file;
+            return file.members.find((m) => m.name === it.member!.name);
+        };
+        const conflicts = items.filter((it) => {
+            const t = findTarget(it);
+            return t && hasDetails(t);
+        });
+
+        // 2. Ask before overwriting anything that already has a log.
+        let overwrite = new Set<LogItem>();
+        if (conflicts.length) {
+            const choice = await vscode.window.showWarningMessage(
+                `${conflicts.length} of the ${items.length} item(s) already have a log here.`,
+                {
+                    modal: true,
+                    detail: 'Overwrite all: replace their title, notes, status, tags, journal and to-dos with the file\'s.\nKeep mine: leave them as they are (only missing items are added).\nChoose: tick which ones to overwrite.'
+                },
+                'Overwrite all',
+                'Keep mine',
+                'Choose…'
+            );
+            if (!choice) return;
+            if (choice === 'Overwrite all') overwrite = new Set(conflicts);
+            else if (choice === 'Choose…') {
+                const ticked = await vscode.window.showQuickPick(
+                    conflicts.map((it) => ({
+                        label: it.title || (it.member ? it.member.name : it.doc),
+                        description: [it.member ? it.member.name : '', it.doc].filter(Boolean).join(' · '),
+                        detail: it.path.join(' › '),
+                        it
+                    })),
+                    { canPickMany: true, placeHolder: 'Tick the items to OVERWRITE with the file\'s log (unticked ones keep yours)', ignoreFocusOut: true }
+                );
+                if (!ticked) return;
+                overwrite = new Set(ticked.map((t) => t.it));
+            }
+        }
+
+        // 3. Apply: create what's missing, fill in / overwrite logs.
+        const ensureFolder = (p: string[]) => {
+            let list = data.folders;
+            let f: LogFolder | undefined;
+            for (const name of p) {
+                f = list.find((x) => x.name === name);
+                if (!f) {
+                    f = { id: newId(), name, description: '', folders: [], files: [] };
+                    list.push(f);
+                }
+                list = f.folders;
+            }
+            return f!;
+        };
+        const summary = { added: 0, filled: 0, overwritten: 0, kept: 0 };
+        for (const it of items) {
+            const before = findTarget(it);
+            if (before && hasDetails(before) && !overwrite.has(it)) {
+                summary.kept++;
+                continue;
+            }
+            const folder = ensureFolder(it.path);
+            const file = addFile(folder, it.server, it.ns, it.doc);
+            let target: LogFile | LogMember = file;
+            if (it.member) {
+                const m = addMember(file, it.member.name, it.member.kind);
+                if (it.group) {
+                    let g = file.groups.find((x) => x.name === it.group);
+                    if (!g) {
+                        g = { id: newId(), name: it.group, description: '' };
+                        file.groups.push(g);
+                    }
+                    if (!m.group || overwrite.has(it)) m.group = g.id;
+                }
+                target = m;
+            }
+            target.title = it.title;
+            target.description = it.description;
+            const created = before?.created;
+            copyWork(it, target);
+            if (created) target.created = created;
+            target.created ||= new Date().toISOString();
+            target.edited ||= new Date().toISOString();
+            if (!before) summary.added++;
+            else if (overwrite.has(it)) summary.overwritten++;
+            else summary.filled++;
+        }
+        selected = selected && nodes.get(selected.id);
+        changed();
+        vscode.window.showInformationMessage(
+            `Log imported: ${summary.added} added, ${summary.filled} filled in, ${summary.overwritten} overwritten, ${summary.kept} kept as yours.`
+        );
+    });
+
+    /**
+     * A project file: tick which subfolders / documents to take. If you already
+     * have the project, tick which of the existing ones to replace (the rest
+     * merge). Your status, tags, journal and to-dos are kept either way.
+     */
+    const importProject = async (project: LogFolder) => {
+        const existing = data.folders.find((f) => f.name === project.name);
+        type Unit = { kind: 'folder'; f: LogFolder } | { kind: 'file'; f: LogFile };
+        const units: Unit[] = [...project.folders.map((f) => ({ kind: 'folder' as const, f })), ...project.files.map((f) => ({ kind: 'file' as const, f }))];
+        const existsIn = (u: Unit) =>
+            !existing ? undefined
+            : u.kind === 'folder' ? existing.folders.find((x) => x.name === u.f.name)
+            : existing.files.find((x) => sameDoc(x, u.f.server, u.f.ns, u.f.doc));
+
+        let chosen: Unit[] = units;
+        if (units.length) {
+            const picked = await vscode.window.showQuickPick(
+                units.map((u) => ({
+                    label: u.kind === 'folder' ? `$(folder) ${u.f.name}` : `$(file-code) ${u.f.doc}`,
+                    description: existsIn(u) ? 'already exists' : 'new',
+                    detail: u.kind === 'folder' ? `${countFiles(u.f)} document(s)` : `${u.f.members.length} label(s) / method(s)`,
+                    picked: true,
+                    u
+                })),
+                {
+                    canPickMany: true,
+                    placeHolder: existing
+                        ? `Project "${project.name}" (you have it): which parts to import?`
+                        : `New project "${project.name}": which parts to import?`,
+                    ignoreFocusOut: true
+                }
+            );
+            if (!picked?.length) return;
+            chosen = picked.map((p) => p.u);
+        }
+
+        if (!existing) {
+            data.folders.push({ ...project, folders: chosen.flatMap((u) => (u.kind === 'folder' ? [u.f] : [])), files: chosen.flatMap((u) => (u.kind === 'file' ? [u.f] : [])) });
+            selected = undefined;
+            changed();
+            vscode.window.showInformationMessage(`Added project "${project.name}".`);
+            await select(project.id);
+            return;
+        }
+
+        const clashing = chosen.filter((u) => existsIn(u));
+        let replace = new Set<Unit>();
+        if (clashing.length) {
+            const toReplace = await vscode.window.showQuickPick(
+                clashing.map((u) => ({ label: u.kind === 'folder' ? `$(folder) ${u.f.name}` : `$(file-code) ${u.f.doc}`, description: 'replace', u })),
+                {
+                    canPickMany: true,
+                    placeHolder: 'You already have these. Tick the ones to REPLACE; unticked ones are merged into yours.',
+                    ignoreFocusOut: true
+                }
+            );
+            if (!toReplace) return;
+            replace = new Set(toReplace.map((t) => t.u));
+            if (replace.size) {
+                const ok = await vscode.window.showWarningMessage(
+                    `Replace ${replace.size} part(s) of "${project.name}" with the imported version? Your status, tags, journal and to-dos are kept.`,
+                    { modal: true },
+                    'Replace'
+                );
+                if (ok !== 'Replace') return;
+            }
+        }
+
+        existing.description ||= project.description;
+        const summary = { added: 0, merged: 0, replaced: 0 };
+        for (const u of chosen) {
+            const old = existsIn(u);
+            if (!old) {
+                if (u.kind === 'folder') existing.folders.push(u.f);
+                else existing.files.push(u.f);
+                summary.added++;
+            } else if (replace.has(u)) {
+                if (u.kind === 'folder') {
+                    carryWorkFolder(old as LogFolder, u.f);
+                    existing.folders[existing.folders.indexOf(old as LogFolder)] = u.f;
+                } else {
+                    carryWorkFiles([old as LogFile], [u.f]);
+                    existing.files[existing.files.indexOf(old as LogFile)] = u.f;
+                }
+                summary.replaced++;
+            } else {
+                if (u.kind === 'folder') mergeFolders(existing.folders, [u.f]);
+                else mergeFile(old as LogFile, u.f);
+                summary.merged++;
+            }
+        }
+        selected = undefined;
+        changed();
+        vscode.window.showInformationMessage(
+            `Imported into "${project.name}": ${summary.added} added, ${summary.merged} merged, ${summary.replaced} replaced.`
+        );
+        await select(existing.id);
+    };
 
     reg('import', async () => {
         const picked = await vscode.window.showOpenDialog({
@@ -1016,7 +1647,10 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         try {
             const parsed = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(picked[0])).toString('utf8'));
             if (!isValidData(parsed)) throw new Error('not a Code Log export');
+            if (parsed.format === LOG_FORMAT) throw new Error('this is a Details (log) export - use Import Log in the Details panel');
             incoming = normalize(parsed);
+            // The tree carries titles and notes only; status, tags, journal and to-dos come via Import Log.
+            incoming.folders.forEach(stripWork);
             isProject = parsed.scope === 'project' || (parsed.scope === undefined && incoming.folders.length === 1);
         } catch (e: any) {
             vscode.window.showErrorMessage(`Couldn't import ${picked[0].fsPath}: ${e?.message || e}`);
@@ -1027,35 +1661,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         const count = incoming.folders.reduce((n, f) => n + countFiles(f), 0);
 
         if (isProject && incoming.folders.length === 1) {
-            const project = incoming.folders[0];
-            const existing = data.folders.find((f) => f.name === project.name);
-            if (!existing) {
-                data.folders.push(project);
-            } else {
-                const how = await vscode.window.showQuickPick(
-                    [
-                        { label: 'Merge', description: `Combine with your project "${project.name}"; matching subfolders, documents and members are combined.` },
-                        { label: 'Replace', description: `Replace your project "${project.name}" with the imported one. Other projects are untouched.` },
-                        { label: 'Add as a copy', description: `Keep both: add it as "${project.name} (imported)".` }
-                    ],
-                    { placeHolder: `You already have a project "${project.name}".`, ignoreFocusOut: true }
-                );
-                if (!how) return;
-                if (how.label === 'Merge') {
-                    mergeFolders(data.folders, [project]);
-                } else if (how.label === 'Replace') {
-                    const ok = await vscode.window.showWarningMessage(`Replace your project "${project.name}" with the imported one?`, { modal: true }, 'Replace');
-                    if (ok !== 'Replace') return;
-                    data.folders[data.folders.indexOf(existing)] = project;
-                } else {
-                    project.name = `${project.name} (imported)`;
-                    data.folders.push(project);
-                }
-            }
-            selected = undefined;
-            changed();
-            vscode.window.showInformationMessage(`Imported project "${project.name}" (${count} document(s)).`);
-            await select(project.id);
+            await importProject(incoming.folders[0]);
             return;
         }
 
@@ -1103,6 +1709,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 data.folders.push(project);
                 summary.added.push(project.name);
             } else if (overwrite.has(project.name)) {
+                carryWorkFolder(existing, project);
                 data.folders[data.folders.indexOf(existing)] = project;
                 summary.replaced.push(project.name);
             } else {
@@ -1122,6 +1729,12 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         );
     });
 }
+
+function cloneFolderRaw(f: LogFolder): LogFolder {
+    return JSON.parse(JSON.stringify(f));
+}
+
+export const LOG_FORMAT = 'isfs-code-log-details';
 
 /** New ids for a folder and everything in it. */
 function reId(f: LogFolder) {
@@ -1156,258 +1769,87 @@ function mergeFolders(target: LogFolder[], incoming: LogFolder[]) {
         }
         f.description ||= inF.description;
         mergeFolders(f.folders, inF.folders);
-        for (const inFile of inF.files) {
-            const file = f.files.find((x) => sameDoc(x, inFile.server, inFile.ns, inFile.doc));
-            if (!file) {
-                f.files.push(inFile);
-                continue;
-            }
-            file.title ||= inFile.title;
-            file.description ||= inFile.description;
-            // Groups merge by name; incoming members follow their group.
-            const groupMap = new Map<string, string>();
-            for (const inG of inFile.groups) {
-                const g = file.groups.find((x) => x.name === inG.name);
-                if (g) {
-                    g.description ||= inG.description;
-                    groupMap.set(inG.id, g.id);
-                } else {
-                    file.groups.push(inG);
-                    groupMap.set(inG.id, inG.id);
-                }
-            }
-            for (const inM of inFile.members) {
-                const m = file.members.find((x) => x.name === inM.name);
-                const group = inM.group ? groupMap.get(inM.group) : undefined;
-                if (!m) {
-                    if (group) inM.group = group;
-                    else delete inM.group;
-                    file.members.push(inM);
-                } else {
-                    m.title ||= inM.title;
-                    m.description ||= inM.description;
-                    if (!m.group && group) m.group = group;
-                }
-            }
+        mergeFiles(f.files, inF.files);
+    }
+}
+
+/** Documents into a folder's documents: new ones added, matching ones merged. */
+function mergeFiles(target: LogFile[], incoming: LogFile[]) {
+    for (const inFile of incoming) {
+        const file = target.find((x) => sameDoc(x, inFile.server, inFile.ns, inFile.doc));
+        if (file) mergeFile(file, inFile);
+        else target.push(inFile);
+    }
+}
+
+/** Titles / notes fill in where yours are empty; groups merge by name; new members are added. */
+function mergeFile(file: LogFile, inFile: LogFile) {
+    file.title ||= inFile.title;
+    file.description ||= inFile.description;
+    // Groups merge by name; incoming members follow their group.
+    const groupMap = new Map<string, string>();
+    for (const inG of inFile.groups) {
+        const g = file.groups.find((x) => x.name === inG.name);
+        if (g) {
+            g.description ||= inG.description;
+            groupMap.set(inG.id, g.id);
+        } else {
+            file.groups.push(inG);
+            groupMap.set(inG.id, inG.id);
         }
     }
+    for (const inM of inFile.members) {
+        const m = file.members.find((x) => x.name === inM.name);
+        const group = inM.group ? groupMap.get(inM.group) : undefined;
+        if (!m) {
+            if (group) inM.group = group;
+            else delete inM.group;
+            file.members.push(inM);
+        } else {
+            m.title ||= inM.title;
+            m.description ||= inM.description;
+            if (!m.group && group) m.group = group;
+        }
+    }
+}
+
+const WORK_KEYS: (keyof Work)[] = ['status', 'tags', 'journal', 'todos', 'created', 'edited'];
+
+function copyWork(from: Work, to: Work) {
+    for (const k of WORK_KEYS) {
+        if (from[k] === undefined) delete (to as any)[k];
+        else (to as any)[k] = JSON.parse(JSON.stringify(from[k]));
+    }
+}
+
+/**
+ * A tree import replaced `oldFiles` with `newFiles`: keep your status, tags,
+ * journal and to-dos on documents / members that are in both (the tree file
+ * only carries titles and notes).
+ */
+function carryWorkFiles(oldFiles: LogFile[], newFiles: LogFile[]) {
+    for (const nf of newFiles) {
+        const of = oldFiles.find((x) => sameDoc(x, nf.server, nf.ns, nf.doc));
+        if (!of) continue;
+        copyWork(of, nf);
+        for (const nm of nf.members) {
+            const om = of.members.find((x) => x.name === nm.name);
+            if (om) copyWork(om, nm);
+        }
+    }
+}
+
+/** Same, for whole folders (matching documents anywhere inside them). */
+function carryWorkFolder(oldF: LogFolder, newF: LogFolder) {
+    const all = (f: LogFolder): LogFile[] => [...f.files, ...f.folders.flatMap(all)];
+    const oldFiles = all(oldF);
+    const walk = (f: LogFolder) => {
+        carryWorkFiles(oldFiles, f.files);
+        f.folders.forEach(walk);
+    };
+    walk(newF);
 }
 
 function escapeMd(s: string): string {
     return s.replace(/[\\`*_{}[\]()#+\-.!|<>]/g, '\\$&');
-}
-
-// ---------------------------------------------------------------------------
-// Details panel
-// ---------------------------------------------------------------------------
-
-interface NodeView {
-    id: string;
-    kind: 'folder' | 'file' | 'group' | 'member';
-    /** Read-only context, top to bottom: namespace, folder path, document, member. */
-    context: { label: string; value: string; mono?: boolean }[];
-    fields: { key: 'name' | 'title' | 'description'; label: string; value: string; multiline: boolean }[];
-    canOpen: boolean;
-    openHint?: string;
-}
-
-function describeNode(n: Node, pathOf: (f: LogFolder) => string[]): NodeView {
-    if (n.kind === 'folder') {
-        const parents = pathOf(n.folder).slice(0, -1);
-        return {
-            id: n.id,
-            kind: 'folder',
-            context: parents.length ? [{ label: 'Inside', value: parents.join(' › ') }] : [],
-            fields: [
-                { key: 'name', label: n.parent ? 'Folder name' : 'Project name', value: n.folder.name, multiline: false },
-                { key: 'description', label: 'Description', value: n.folder.description, multiline: true }
-            ],
-            canOpen: false
-        };
-    }
-    const open = !!folderFor(n.file.server, n.file.ns);
-    const ctx: NodeView['context'] = [
-        { label: 'Namespace', value: `${n.file.ns}  ·  ${n.file.server}` },
-        { label: 'Folder', value: pathOf(n.folder).join(' › ') },
-        { label: 'Document', value: n.file.doc, mono: true }
-    ];
-    if (n.kind === 'group') {
-        return {
-            id: n.id,
-            kind: 'group',
-            context: ctx,
-            fields: [
-                { key: 'name', label: 'Group name', value: n.group.name, multiline: false },
-                { key: 'description', label: 'Description', value: n.group.description, multiline: true }
-            ],
-            canOpen: false
-        };
-    }
-    if (n.kind === 'member') {
-        if (n.group) ctx.push({ label: 'Group', value: n.group.name });
-        ctx.push({ label: n.member.kind, value: n.member.name, mono: true });
-    }
-    const target = n.kind === 'file' ? n.file : n.member;
-    return {
-        id: n.id,
-        kind: n.kind,
-        context: ctx,
-        fields: [
-            { key: 'title', label: 'Title', value: target.title, multiline: false },
-            { key: 'description', label: 'Description', value: target.description, multiline: true }
-        ],
-        canOpen: open,
-        openHint: open ? undefined : `Namespace ${n.file.ns} on ${n.file.server} isn't open in this workspace.`
-    };
-}
-
-class DetailsView implements vscode.WebviewViewProvider {
-    private view?: vscode.WebviewView;
-    private pending: NodeView | undefined;
-
-    constructor(private readonly onMessage: (msg: any) => void) {}
-
-    resolveWebviewView(view: vscode.WebviewView) {
-        this.view = view;
-        view.webview.options = { enableScripts: true };
-        view.webview.html = this.html();
-        view.webview.onDidReceiveMessage((m) => {
-            if (m?.type === 'ready') this.post();
-            else this.onMessage(m);
-        });
-        view.onDidDispose(() => (this.view = undefined));
-    }
-
-    show(node: NodeView | undefined) {
-        this.pending = node;
-        this.post();
-    }
-
-    private post() {
-        this.view?.webview.postMessage({ type: 'show', node: this.pending ?? null });
-    }
-
-    private html(): string {
-        const nonce = newId() + newId();
-        return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<style>
-    body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); padding: 10px 12px 16px; margin: 0; }
-    .empty { color: var(--vscode-descriptionForeground); line-height: 1.5; }
-    .ctx {
-        border-left: 2px solid var(--vscode-textLink-foreground);
-        background: var(--vscode-textBlockQuote-background, rgba(127,127,127,.08));
-        border-radius: 0 4px 4px 0;
-        padding: 6px 10px 8px;
-        margin-bottom: 14px;
-    }
-    .ctx-row { padding: 3px 0; }
-    .ctx-row + .ctx-row { border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,.18)); }
-    .k { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-descriptionForeground); }
-    .v { margin-top: 1px; overflow-wrap: anywhere; line-height: 1.35; }
-    .mono { font-family: var(--vscode-editor-font-family); font-size: 12px; }
-    .field { margin-top: 12px; }
-    .field .k { display: block; margin-bottom: 4px; }
-    input, textarea {
-        width: 100%; box-sizing: border-box; padding: 6px 8px;
-        color: var(--vscode-input-foreground); background: var(--vscode-input-background);
-        border: 1px solid var(--vscode-input-border, rgba(127,127,127,.25)); border-radius: 3px;
-        font-family: inherit; font-size: inherit; line-height: 1.4;
-    }
-    input.title { font-size: 14px; font-weight: 600; }
-    input:focus, textarea:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-    textarea { min-height: 120px; resize: vertical; }
-    .actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
-    button {
-        color: var(--vscode-button-foreground); background: var(--vscode-button-background);
-        border: none; padding: 5px 14px; border-radius: 3px; cursor: pointer; font-family: inherit;
-    }
-    button:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
-    button:disabled { opacity: .45; cursor: default; }
-    .saved { font-size: 12px; color: var(--vscode-descriptionForeground); transition: opacity .3s; }
-    .hint { font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 8px; }
-</style>
-</head>
-<body>
-<div id="root"></div>
-<script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    const root = document.getElementById('root');
-    const EMPTY = 'Select a folder, document or member in the Code Log above to see and edit its notes.';
-    let current = null;
-    const timers = {};
-    let savedTimer;
-
-    function el(tag, props, ...kids) {
-        const e = document.createElement(tag);
-        Object.assign(e, props || {});
-        for (const k of kids) e.append(k);
-        return e;
-    }
-
-    function render(node) {
-        current = node;
-        root.textContent = '';
-        if (!node) {
-            root.append(el('div', { className: 'empty', textContent: EMPTY }));
-            return;
-        }
-        if (node.context.length) {
-            const box = el('div', { className: 'ctx' });
-            for (const c of node.context) {
-                box.append(el('div', { className: 'ctx-row' },
-                    el('div', { className: 'k', textContent: c.label }),
-                    el('div', { className: 'v' + (c.mono ? ' mono' : ''), textContent: c.value, dir: 'auto' })));
-            }
-            root.append(box);
-        }
-        const saved = el('span', { className: 'saved' });
-        for (const f of node.fields) {
-            const input = f.multiline
-                ? el('textarea', { value: f.value, dir: 'auto', placeholder: 'What it does, where it is called from, notes...' })
-                : el('input', { value: f.value, dir: 'auto', type: 'text', className: f.key === 'title' || f.key === 'name' ? 'title' : '' });
-            input.addEventListener('input', () => {
-                saved.textContent = '';
-                clearTimeout(timers[f.key]);
-                const id = node.id;
-                timers[f.key] = setTimeout(() => {
-                    vscode.postMessage({ type: 'edit', id, field: f.key, value: input.value });
-                    saved.textContent = 'Saved';
-                    clearTimeout(savedTimer);
-                    savedTimer = setTimeout(() => (saved.textContent = ''), 1500);
-                }, 400);
-            });
-            root.append(el('div', { className: 'field' }, el('span', { className: 'k', textContent: f.label }), input));
-        }
-        const actions = el('div', { className: 'actions' });
-        if (node.kind === 'file' || node.kind === 'member') {
-            const open = el('button', { textContent: 'Go to code \\u2192', disabled: !node.canOpen });
-            open.addEventListener('click', () => vscode.postMessage({ type: 'open', id: node.id }));
-            actions.append(open);
-        }
-        actions.append(saved);
-        root.append(actions);
-        if (node.openHint) root.append(el('div', { className: 'hint', textContent: node.openHint }));
-    }
-
-    window.addEventListener('message', (e) => {
-        if (e.data?.type !== 'show') return;
-        const node = e.data.node;
-        // Don't wipe what's being typed when the same item is re-sent.
-        const typing = document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName);
-        if (node && current && node.id === current.id && typing) {
-            current = node;
-            return;
-        }
-        render(node);
-    });
-    render(null);
-    vscode.postMessage({ type: 'ready' });
-</script>
-</body>
-</html>`;
-    }
 }

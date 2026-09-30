@@ -1,5 +1,36 @@
 # Change Log
 
+## [1.7.9]
+
+- Code Log **Details** redesigned, with two tabs:
+  - **Overview**: a status tree of the whole log with roll-ups, open to-do counts, and filters by status, open to-dos
+    and #tag.
+  - **Item**: editable title, status badge, tags (add / remove / rename everywhere), a link to the code, and sub-tabs
+    **Notes** (bullets, `code`, **bold**), **Journal**, **To-do** and **Info** (clickable Document / Method cards
+    replace the Go to code button).
+- Status, tags, journal and to-dos apply to documents and labels / methods. Projects, folders and groups keep name + notes.
+- New **Export Log / Import Log** in the Details title bar (all projects or one). Import creates missing tree items and
+  asks Overwrite all / Keep mine / Choose… for items that already have a log.
+- Tree Export / Import now carry titles and notes only. Importing a single project shows a checklist of its subfolders
+  and documents (new / already exists) and which existing ones to replace; the rest merge. Replacing keeps your
+  status, tags, journal and to-dos.
+
+## [1.7.8]
+
+- Code Log: closing a row now also closes everything inside it. The Expand / Collapse All Below buttons are removed.
+
+## [1.7.7]
+
+- Code Log opens with everything collapsed.
+- **Expand All Below / Collapse All Below** button on projects, folders and documents that have foldable rows under
+  them (also on right-click): opens or folds that row and everything beneath it.
+
+## [1.7.6]
+
+- Code Log: the button on a group is now **Choose Members**: a checklist of the document's already-logged labels /
+  methods, with the group's members ticked. Tick / untick to arrange the group; members from another group move over.
+  Adding not-yet-logged members is the last entry of the list.
+
 ## [1.7.5]
 
 - Code Log: **groups** inside a document, to organise many labels / methods. New Group (right-click a document),
