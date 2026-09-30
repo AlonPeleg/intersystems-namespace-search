@@ -185,13 +185,15 @@ The Code Log opens with everything collapsed. Open rows one level at a time with
 closes everything inside it, so the next time you open it you see one clean level. The title-bar **Collapse All**
 folds the whole tree.
 
-**Details panel**
+**Code Log panel**
 
-The tree is for organising and quick access; the log itself lives in **Details** below it, which has two tabs.
+The sidebar has two sections: **Projects** (the tree) for organising and quick access, and the **Code Log** panel
+below it, which holds the log itself in two tabs.
 
 *Overview* shows the whole log as a status tree. Each document and label / method shows its status dot, title and open
 to-dos; projects and folders roll up a small status bar and a count of open to-dos (☐). Filter by status with the
-chips, by **☐ open to-dos**, or by **#tag**. Parents of a match stay visible. Click a row to open it in the Item tab.
+chips, by **☐ open to-dos**, or by **#tag**. Parents of a match stay visible. Click a row to open or close it;
+double-click it to show it in the Item tab.
 
 *Item* shows the entry you selected in the tree (selecting switches to this tab):
 
@@ -202,7 +204,11 @@ chips, by **☐ open to-dos**, or by **#tag**. Parents of a match stay visible. 
 - **Journal**: dated entries, newest first. Edit or delete (with undo) from the entry's hover buttons.
 - **To-do**: add, tick, edit, drag to reorder, delete (with undo). Done items move to their own section.
 - **Info**: clickable **Document** and **Method** cards that open the code, then group, folder, namespace, server
-  (open / not open in your workspace), added and last edited.
+  (open / not open in your workspace), added and last edited. Documents with labels / methods list them there too
+  (by group, with their type).
+
+For projects, folders and groups, Info lists what's inside (subfolders and documents, or the group's members).
+Click a row to show it; ↗ opens the code.
 
 Status, tags, journal and to-dos are for documents and labels / methods. Projects, folders and groups have a name
 and notes only.
@@ -211,7 +217,7 @@ Changes save as you type. Text direction follows what you type, so Hebrew works 
 
 **Going to the code**
 
-The **Go to code** arrow on a row (or the link / cards in Details) opens the document, or the document at that label
+The **Go to code** arrow on a row (or the link / cards in the Code Log panel) opens the document, or the document at that label
 or method. Members are found by **name** when you click, so they still work after the code is edited.
 This only works while that server and namespace is open in your workspace. Otherwise the entry is greyed out and
 marked "(not open)", but it stays in the log.
@@ -224,7 +230,7 @@ Top-level folders are **projects**. They have their own icon and an emphasised n
 
 The log is saved in VS Code on this computer. There are two kinds of export:
 
-*Tree export / import* (Code Log title bar and project rows) carries the structure plus **titles and notes** only.
+*Tree export / import* (Projects title bar and project rows) carries the structure plus **titles and notes** only.
 
 - **Export** in the title bar saves the whole log as a JSON file.
 - **Export Project** (the export icon on a project row, or right-click) saves just that project with its subfolders.
@@ -236,7 +242,7 @@ The log is saved in VS Code on this computer. There are two kinds of export:
   - Replacing never loses your status, tags, journal or to-dos on documents that stay; those come only from a log
     export.
 
-*Log export / import* (the Details panel title bar) carries everything: title, notes, status, tags, journal and to-dos.
+*Log export / import* (the Code Log panel title bar) carries everything: title, notes, status, tags, journal and to-dos.
 
 - **Export Log** asks for **all projects** or **one project**.
 - **Import Log** creates any missing projects, folders, documents, groups and labels / methods in the tree. If some

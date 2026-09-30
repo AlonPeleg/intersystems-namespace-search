@@ -143,3 +143,13 @@ textarea.notesedit { min-height: 110px; resize: vertical; line-height: 1.5; }
     background: var(--vscode-notifications-background, var(--vscode-editorWidget-background)); border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(0, 0, 0, .3); z-index: 20;
 }
 .toast button { color: var(--vscode-textLink-foreground); font-weight: 600; }
+
+/* contents / members list (Info tab) */
+.contents { margin-top: 10px; }
+.contents .sec { margin-left: 0; }
+.crow { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px 4px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.crow:hover { background: var(--hover); }
+.crow .link { flex: none; }
+.ctype { font-size: 10.5px; color: var(--muted); }
+.ico.fld { background: rgba(127, 127, 127, .18); color: var(--muted); }
+.ico.grp { background: rgba(127, 127, 127, .12); color: var(--muted); }

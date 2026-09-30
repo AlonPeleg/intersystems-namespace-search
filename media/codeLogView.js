@@ -1,4 +1,4 @@
-// Code Log - Details panel (Overview + Item).
+// Code Log panel (Overview + Item), below the Projects tree.
 // The extension sends the whole state; this page renders it and sends back
 // small edit messages. The extension saves them and sends the new state.
 (function () {
@@ -124,17 +124,17 @@
     // ----- Item -----
     function renderItem() {
         const s = state.selected;
-        if (!s) return h('div', { class: 'empty', text: 'Select a folder, document or label / method in the Code Log tree above to see its log.' });
+        if (!s) return h('div', { class: 'empty', text: 'Select a folder, document or label / method in Projects above to see its log.' });
         const wrap = h('div');
         wrap.append(renderHeader(s));
         const tabs = s.work
-            ? [['notes', 'Notes'], ['journal', 'Journal', s.journal.length || ''], ['todo', 'To-do', s.todos.length ? `${s.todos.filter((t) => !t.done).length}/${s.todos.length}` : ''], ['info', 'Info']]
+            ? [['notes', 'Notes'], ['journal', 'Journal', s.journal.length || ''], ['todo', 'To-do', s.todos.length ? `${s.todos.filter((t) => t.done).length}/${s.todos.length}` : ''], ['info', 'Info']]
             : [['notes', 'Notes'], ['info', 'Info']];
         if (!tabs.some(([k]) => k === ui.sub)) ui.sub = 'notes';
         wrap.append(
             h('div', { class: 'subtabs' },
                 tabs.map(([k, label, c]) =>
-                    h('button', { class: ui.sub === k ? 'on' : '', onclick: () => { ui.sub = k; persistUi(); render(); } }, label, c ? h('span', { class: 'cnt', text: String(c) }) : null)
+                    h('button', { class: ui.sub === k ? 'on' : '', onclick: () => { ui.sub = k; persistUi(); render(); } }, label, c ? h('span', { class: 'cnt', text: String(c), title: k === 'todo' ? 'done / total' : '' }) : null)
                 )
             )
         );
@@ -366,7 +366,7 @@
                 class: 'card' + (off ? ' off' : ''), title: off ? offTip : 'Open the document',
                 onclick: () => !off && post({ type: 'open', id: s.id, target: 'file' })
             },
-                h('span', { class: 'ico ' + (s.docType === 'cls' ? 'cls' : 'rtn'), text: s.docType === 'cls' ? 'C' : 'R' }),
+                h('span', { class: 'ico ' + (s.docType === 'cls' ? 'cls' : 'rtn'), text: s.docType === 'cls' ? 'C' : 'R', title: s.docType === 'cls' ? 'Class' : 'Routine' }),
                 h('div', { style: 'flex:1;min-width:0' }, h('div', { class: 'ck', text: 'Document' }), h('div', { class: 'cv', text: s.doc })),
                 h('span', { class: 'link' + (off ? ' off' : ''), text: '↗' })));
             if (s.member) {
@@ -374,7 +374,7 @@
                     class: 'card' + (off ? ' off' : ''), title: off ? offTip : 'Go to it in the code',
                     onclick: () => !off && post({ type: 'open', id: s.id, target: 'member' })
                 },
-                    h('span', { class: 'ico mth', text: s.member.kind === 'Label' ? 'L' : 'M' }),
+                    h('span', { class: 'ico mth', text: s.member.kind === 'Label' ? 'L' : 'M', title: s.member.kind }),
                     h('div', { style: 'flex:1;min-width:0' }, h('div', { class: 'ck', text: s.member.kind }), h('div', { class: 'cv', text: s.member.name })),
                     h('span', { class: 'link' + (off ? ' off' : ''), text: '↗' })));
             }
@@ -387,20 +387,56 @@
             add('Added', fmtDate(s.created));
             add('Last edited', fmtDate(s.edited));
             wrap.append(kv);
+            if (s.contents && s.contents.length) wrap.append(renderContents('Members', s.contents));
         } else {
             const kv = h('div', { class: 'kv', style: 'margin-top:0' });
             const add = (k, v) => kv.append(h('div', { class: 'k', text: k }), h('div', { class: 'v', dir: 'auto', text: v }));
             if (s.kind === 'group') {
                 add('Document', s.doc);
-                add('Members', String(s.counts.members));
             } else {
                 add('Inside', s.path.length ? s.path.join(' › ') : '— (project)');
                 add('Documents', String(s.counts.docs));
                 add('Labels / methods', String(s.counts.members));
             }
             wrap.append(kv);
+            wrap.append(renderContents(s.kind === 'group' ? 'Members' : 'Contents', s.contents || []));
         }
         return wrap;
+    }
+
+    // Clickable list of what's inside: click = show it here (and in the tree), ↗ = open the code.
+    function renderContents(title, list) {
+        const box = h('div', { class: 'contents' }, h('div', { class: 'sec', text: `${title} (${list.some((x) => x.kind === 'member') ? list.filter((x) => x.kind === 'member').length : list.length})` }));
+        if (!list.length) {
+            box.append(h('div', { class: 'muted small', style: 'padding:2px 4px', text: 'Nothing here yet.' }));
+            return box;
+        }
+        for (const c of list) {
+            const ico = c.kind === 'folder' ? h('span', { class: 'ico fld', text: '▤', title: 'Folder' })
+                : c.kind === 'group' ? h('span', { class: 'ico grp', text: '≋', title: 'Group' })
+                : c.kind === 'file' ? h('span', { class: 'ico ' + c.docType, text: c.docType === 'cls' ? 'C' : 'R', title: c.docType === 'cls' ? 'Class' : 'Routine' })
+                : h('span', { class: 'ico mth', text: c.type === 'Label' ? 'L' : 'M', title: c.type });
+            const row = h('div', {
+                class: 'crow', style: `padding-left:${4 + c.depth * 18}px`, title: 'Show it in the Code Log',
+                onclick: () => post({ type: 'select', id: c.id })
+            }, ico);
+            if (c.kind === 'file' || c.kind === 'member') row.append(h('span', { class: 'dot ' + (c.status ? STATUS[c.status].cls : 'none') }));
+            row.append(h('span', { class: 'lbl', dir: 'auto', text: c.label }));
+            if (c.sub) row.append(h('span', { class: 'sub mono', text: c.sub }));
+            const right = h('span', { class: 'right' });
+            if (c.openTodos) right.append(h('span', { class: 'td', text: '☐' + c.openTodos }));
+            right.append(h('span', { class: 'ctype', text: c.type }));
+            if (c.kind === 'file' || c.kind === 'member') {
+                right.append(h('span', {
+                    class: 'link' + (c.canOpen ? '' : ' off'), text: '↗',
+                    title: c.canOpen ? 'Open the code' : "That namespace isn't open in this workspace",
+                    onclick: (e) => { e.stopPropagation(); if (c.canOpen) post({ type: 'open', id: c.id, target: c.kind === 'file' ? 'file' : 'member' }); }
+                }));
+            }
+            row.append(right);
+            box.append(row);
+        }
+        return box;
     }
 
     // ----- Overview -----
@@ -425,7 +461,7 @@
         const wrap = h('div');
         const all = state.projects.flatMap((p) => collect(p, []));
         if (!state.projects.length) {
-            wrap.append(h('div', { class: 'empty', text: 'No projects yet. Create one with New Folder in the Code Log title bar.' }));
+            wrap.append(h('div', { class: 'empty', text: 'No projects yet. Create one with New Folder in the Projects title bar.' }));
             return wrap;
         }
         const counts = { check: 0, progress: 0, ok: 0, fix: 0 };
@@ -478,22 +514,32 @@
     }
 
     function renderOvRow(n, depth, hasKids, open) {
-        const sel = state.selected && state.selected.id === n.id;
+        const sel = (ui.ovSel || (state.selected && state.selected.id)) === n.id;
+        const toggle = () => {
+            if (!hasKids || filtering()) return;
+            ui.expanded.has(n.id) ? ui.expanded.delete(n.id) : ui.expanded.add(n.id);
+            persistUi();
+        };
         const row = h('div', {
             class: 'ovrow' + (sel ? ' sel' : ''), style: `padding-left:${4 + depth * 14}px`,
-            title: tooltip(n),
-            onclick: () => { ui.main = 'item'; post({ type: 'select', id: n.id }); }
-        });
-        row.append(h('span', {
-            class: 'tw', text: hasKids ? (open ? '▾' : '▸') : '',
+            title: tooltip(n) + '\n(double-click to open it in Item)',
+            // One click: open / close (or just highlight a row with nothing inside). Double click: show it in Item.
             onclick: (e) => {
-                e.stopPropagation();
-                if (!hasKids || filtering()) return;
-                ui.expanded.has(n.id) ? ui.expanded.delete(n.id) : ui.expanded.add(n.id);
-                persistUi();
+                if (e.detail === 2) {
+                    toggle(); // undo the first click's open / close
+                    ui.ovSel = null;
+                    ui.main = 'item';
+                    render();
+                    post({ type: 'select', id: n.id });
+                    return;
+                }
+                if (e.detail > 2) return;
+                ui.ovSel = n.id;
+                toggle();
                 render();
             }
-        }));
+        });
+        row.append(h('span', { class: 'tw', text: hasKids ? (open ? '▾' : '▸') : '' }));
         if (isWork(n)) row.append(h('span', { class: 'dot ' + (n.status ? STATUS[n.status].cls : 'none') }));
         else if (n.kind === 'group') row.append(h('span', { class: 'muted', text: '≋' }));
         const label = h('span', { class: 'lbl', dir: 'auto', text: n.label });
@@ -589,7 +635,7 @@
             ui.editingNotes = false;
             ui.editingJournal = ui.editingTodo = ui.renamingTag = null;
             ui.tagInput = ui.statusMenu = false;
-            if (id && msg.reason === 'selection') ui.main = 'item';
+            if (id && msg.reason === 'selection') { ui.main = 'item'; ui.ovSel = null; }
         }
         if (typing() && id === prevId) {
             ui.pending = true; // don't disturb typing; render when focus leaves

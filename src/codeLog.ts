@@ -598,8 +598,8 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         if (!choices.length) {
             const go = await vscode.window.showInformationMessage(
                 data.folders.length
-                    ? 'No suitable folder in the Code Log.'
-                    : 'Create a folder in the Code Log first (New Folder in its title bar).',
+                    ? 'No suitable folder in Projects.'
+                    : 'Create a folder in Projects first (New Folder in its title bar).',
                 'Open Code Log'
             );
             if (go) await vscode.commands.executeCommand(`${TREE_ID}.focus`);
@@ -760,7 +760,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     const askTitle = (what: string) =>
         vscode.window.showInputBox({
             title: `Title for ${what}`,
-            prompt: 'A short title (optional). Add a longer description in the Details panel.',
+            prompt: 'A short title (optional). Add longer notes in the Code Log panel.',
             ignoreFocusOut: true
         });
 
@@ -796,17 +796,44 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         };
     };
 
+    /** One row of the clickable Contents / Members list in the Info tab. */
+    const entryOfMember = (f: LogFile, m: LogMember, depth = 0) => ({
+        id: m.id, kind: 'member', label: m.title || m.name, sub: m.title ? m.name : '', type: m.kind, status: m.status,
+        openTodos: m.todos.filter((t) => !t.done).length, canOpen: !!folderFor(f.server, f.ns), depth
+    });
+    const membersOfFile = (f: LogFile) => {
+        const out: any[] = [];
+        for (const g of f.groups) {
+            const ms = f.members.filter((m) => m.group === g.id);
+            out.push({ id: g.id, kind: 'group', label: g.name, sub: '', type: `Group · ${ms.length}`, depth: 0 });
+            ms.forEach((m) => out.push(entryOfMember(f, m, 1)));
+        }
+        const known = new Set(f.groups.map((g) => g.id));
+        f.members.filter((m) => !m.group || !known.has(m.group)).forEach((m) => out.push(entryOfMember(f, m)));
+        return out;
+    };
+
     const detailOf = (n: Node) => {
         if (n.kind === 'folder') {
+            const contents = [
+                ...n.folder.folders.map((f) => ({ id: f.id, kind: 'folder', label: f.name, sub: '', type: `Folder · ${countFiles(f)} docs`, depth: 0 })),
+                ...n.folder.files.map((f) => ({
+                    id: f.id, kind: 'file', label: f.title || f.doc, sub: f.title ? f.doc : '', status: f.status,
+                    type: /\.cls$/i.test(f.doc) ? 'Class' : (f.doc.split('.').pop() || '').toUpperCase() || 'Routine',
+                    docType: /\.cls$/i.test(f.doc) ? 'cls' : 'rtn', openTodos: f.todos.filter((t) => !t.done).length,
+                    canOpen: !!folderFor(f.server, f.ns), depth: 0
+                }))
+            ];
             return {
                 id: n.id, kind: 'folder', work: false, name: n.folder.name, description: n.folder.description, isProject: !n.parent,
-                path: pathOf(n.folder).slice(0, -1), counts: { docs: countFiles(n.folder), members: countMembers(n.folder) }
+                path: pathOf(n.folder).slice(0, -1), counts: { docs: countFiles(n.folder), members: countMembers(n.folder) }, contents
             };
         }
         if (n.kind === 'group') {
+            const ms = n.file.members.filter((m) => m.group === n.group.id);
             return {
                 id: n.id, kind: 'group', work: false, name: n.group.name, description: n.group.description, doc: n.file.doc,
-                path: [...pathOf(n.folder), n.file.doc], counts: { members: n.file.members.filter((m) => m.group === n.group.id).length }
+                path: [...pathOf(n.folder), n.file.doc], counts: { members: ms.length }, contents: ms.map((m) => entryOfMember(n.file, m))
             };
         }
         const w = n.kind === 'file' ? n.file : n.member;
@@ -817,7 +844,8 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             doc: n.file.doc, docType: /\.cls$/i.test(n.file.doc) ? 'cls' : 'rtn',
             member: n.kind === 'member' ? { name: n.member.name, kind: n.member.kind } : undefined,
             group, ns: n.file.ns, server: n.file.server, nsOpen: !!folderFor(n.file.server, n.file.ns),
-            path: pathOf(n.folder)
+            path: pathOf(n.folder),
+            contents: n.kind === 'file' ? membersOfFile(n.file) : undefined
         };
     };
 
@@ -1406,7 +1434,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         try {
             const parsed = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(picked[0])).toString('utf8'));
             if (parsed?.format !== LOG_FORMAT) {
-                throw new Error(isValidData(parsed) ? 'this is a Code Log tree export - use Import in the Code Log title bar' : 'not a Log export');
+                throw new Error(isValidData(parsed) ? 'this is a Projects tree export - use Import in the Projects title bar' : 'not a Log export');
             }
             items = (Array.isArray(parsed.items) ? parsed.items : [])
                 .filter((it: any) =>
@@ -1647,7 +1675,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         try {
             const parsed = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(picked[0])).toString('utf8'));
             if (!isValidData(parsed)) throw new Error('not a Code Log export');
-            if (parsed.format === LOG_FORMAT) throw new Error('this is a Details (log) export - use Import Log in the Details panel');
+            if (parsed.format === LOG_FORMAT) throw new Error('this is a Code Log export - use Import Log in the Code Log panel');
             incoming = normalize(parsed);
             // The tree carries titles and notes only; status, tags, journal and to-dos come via Import Log.
             incoming.folders.forEach(stripWork);

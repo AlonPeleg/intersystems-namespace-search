@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.7.9",
+  "version": "1.7.11",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -61,13 +61,13 @@
       "isfsCodeLogContainer": [
         {
           "id": "isfsNamespaceSearch.codeLogTree",
-          "name": "Code Log",
+          "name": "Projects",
           "icon": "images/isfs-codelog-icon.svg"
         },
         {
           "type": "webview",
           "id": "isfsNamespaceSearch.codeLogDetails",
-          "name": "Details",
+          "name": "Code Log",
           "icon": "images/isfs-codelog-icon.svg"
         }
       ]

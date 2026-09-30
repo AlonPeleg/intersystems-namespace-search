@@ -1,5 +1,17 @@
 # Change Log
 
+## [1.7.11]
+
+- The To-do tab counter now shows **done / total** (1/1 when everything is done).
+- Icons in Info show their meaning on hover: C = Class, R = Routine (MAC / INT / INC), M = method, L = label.
+
+## [1.7.10]
+
+- The sidebar sections are now **Projects** (the tree) and **Code Log** (the panel below it).
+- Info tab: projects and folders list their **Contents** (subfolders and documents), groups list their **Members**,
+  and documents with labels / methods list them (grouped, with their type). Click a row to show it, ↗ opens the code.
+- Overview: one click opens / closes a row, a double-click shows it in the Item tab.
+
 ## [1.7.9]
 
 - Code Log **Details** redesigned, with two tabs:
