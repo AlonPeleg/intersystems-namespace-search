@@ -153,3 +153,32 @@ textarea.notesedit { min-height: 110px; resize: vertical; line-height: 1.5; }
 .ctype { font-size: 10.5px; color: var(--muted); }
 .ico.fld { background: rgba(127, 127, 127, .18); color: var(--muted); }
 .ico.grp { background: rgba(127, 127, 127, .12); color: var(--muted); }
+
+/* clickable path (go up) */
+.crumb { cursor: pointer; }
+.crumb:hover { color: var(--vscode-textLink-foreground); text-decoration: underline; }
+
+/* tag filter drop-down */
+.chips { position: relative; }
+.tagfilter { position: static; }
+.tagmenu { top: 100%; left: 8px; right: 8px; width: auto; max-width: 320px; padding: 6px; }
+.tagmenu .taginput { width: 100%; margin-bottom: 4px; border-radius: 3px; }
+.tagitems { max-height: 180px; overflow-y: auto; }
+.tagitem { display: flex; gap: 7px; align-items: center; width: 100%; text-align: left; padding: 3px 6px; border-radius: 3px; }
+.tagitem:hover { background: var(--vscode-menu-selectionBackground, var(--hover)); }
+
+/* Fixed top, scrolling body: the Item header + sub-tabs (and the Overview filters) stay in view.
+   In a very short panel everything scrolls together instead, so nothing gets stuck. */
+@media (min-height: 300px) {
+    html, body { height: 100%; overflow: hidden; }
+    #root { height: 100%; display: flex; flex-direction: column; }
+    .view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+    .view > .fixed { flex: none; }
+    .view > .scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+    .view > .chips { border-bottom: 1px solid var(--line); }
+}
+.maintabs { flex: none; }
+
+/* project picker */
+.chips select.projsel { max-width: 140px; text-overflow: ellipsis; }
+.chips select.projsel.on { border-color: var(--vscode-focusBorder); }

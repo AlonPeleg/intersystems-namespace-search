@@ -67,6 +67,7 @@ interface LogGroup {
     id: string;
     name: string;
     description: string;
+    tags?: string[];
 }
 
 interface LogFile extends Work {
@@ -84,6 +85,7 @@ interface LogFolder {
     id: string;
     name: string;
     description: string;
+    tags?: string[];
     folders: LogFolder[];
     files: LogFile[];
 }
@@ -220,6 +222,7 @@ function normalizeFolder(f: any): LogFolder {
         id: f.id || newId(),
         name: f.name,
         description: f.description || '',
+        tags: normalizeWork(f).tags,
         folders: (f.folders || []).map(normalizeFolder),
         files: f.files.map((x: any) => ({
             id: x.id || newId(),
@@ -276,10 +279,12 @@ export function stripWork(f: LogFolder): LogFolder {
         w.journal = [];
         w.todos = [];
     };
+    f.tags = [];
     f.folders.forEach(stripWork);
     for (const file of f.files) {
         clear(file);
         file.members.forEach(clear);
+        file.groups.forEach((g) => (g.tags = []));
     }
     return f;
 }
@@ -288,7 +293,7 @@ export function stripWork(f: LogFolder): LogFolder {
 function normalizeMembers(x: any): { groups: LogGroup[]; members: LogMember[] } {
     const groups: LogGroup[] = (Array.isArray(x.groups) ? x.groups : [])
         .filter((g: any) => typeof g?.name === 'string')
-        .map((g: any) => ({ id: g.id || newId(), name: g.name, description: g.description || '' }));
+        .map((g: any) => ({ id: g.id || newId(), name: g.name, description: g.description || '', tags: normalizeWork(g).tags }));
     const ids = new Set(groups.map((g) => g.id));
     const members: LogMember[] = (x.members || []).filter((m: any) => typeof m?.name === 'string').map((m: any) => ({
         id: m.id || newId(),
@@ -464,7 +469,8 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
 
     const dnd: vscode.TreeDragAndDropController<Node> = {
         dragMimeTypes: [DRAG_MIME],
-        dropMimeTypes: [DRAG_MIME],
+        // Also accepts a .json file (from Explorer / the desktop) or dragged JSON text: imports it.
+        dropMimeTypes: [DRAG_MIME, 'text/uri-list', 'text/plain'],
         handleDrag(source, transfer) {
             // Documents, subfolders, groups and members; projects (top-level folders) stay put.
             const ids = source
@@ -474,7 +480,10 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         },
         async handleDrop(target, transfer) {
             const ids: string[] | undefined = transfer.get(DRAG_MIME)?.value;
-            if (!ids?.length) return;
+            if (!ids?.length) {
+                await importDropped(transfer);
+                return;
+            }
             // Onto a folder: into it. Onto a document/member: into its folder. Onto empty space: top level (folders only).
             const to = target ? target.folder : undefined;
             for (const id of ids) {
@@ -487,6 +496,29 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             changed();
         }
     };
+
+    /** A file or JSON text dropped onto the tree from outside: import it (tree or log export, whichever it is). */
+    async function importDropped(transfer: vscode.DataTransfer) {
+        try {
+            const uris = ((await transfer.get('text/uri-list')?.asString()) ?? '')
+                .split(/\r?\n/)
+                .map((x) => x.trim())
+                .filter((x) => x && !x.startsWith('#'));
+            if (uris.length) {
+                const uri = vscode.Uri.parse(uris[0]);
+                if (!/\.json$/i.test(uri.path)) {
+                    vscode.window.showWarningMessage('Drop a .json export (Projects or Code Log) to import it.');
+                    return;
+                }
+                await importAuto(await readJsonFile(uri));
+                return;
+            }
+            const text = ((await transfer.get('text/plain')?.asString()) ?? '').trim();
+            if (text.startsWith('{')) await importAuto({ text, label: 'the dropped JSON' });
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Couldn't import the dropped item: ${e?.message || e}`);
+        }
+    }
 
     const tree = vscode.window.createTreeView(TREE_ID, {
         treeDataProvider: provider,
@@ -771,6 +803,10 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     /** Everything the Details page needs: the selected item and the whole log for the Overview. */
     const buildState = () => {
         const tagCounts = new Map<string, number>();
+        const countTags = (tags: string[] | undefined) => {
+            (tags ?? []).forEach((t) => tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1));
+            return tags ?? [];
+        };
         const work = (w: Work & { title: string; description: string }) => {
             w.tags.forEach((t) => tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1));
             const open = w.todos.filter((t) => !t.done);
@@ -780,12 +816,12 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         const ovFile = (x: LogFile) => ({
             id: x.id, kind: 'file', label: x.title || x.doc, sub: x.title ? x.doc : undefined, ...work(x),
             children: [
-                ...x.groups.map((g) => ({ id: g.id, kind: 'group', label: g.name, notes: g.description, children: x.members.filter((m) => m.group === g.id).map(ovMember) })),
+                ...x.groups.map((g) => ({ id: g.id, kind: 'group', label: g.name, notes: g.description, tags: countTags(g.tags), children: x.members.filter((m) => m.group === g.id).map(ovMember) })),
                 ...x.members.filter((m) => !m.group).map(ovMember)
             ]
         });
         const ovFolder = (f: LogFolder, project: boolean): any => ({
-            id: f.id, kind: 'folder', label: f.name, project, notes: f.description,
+            id: f.id, kind: 'folder', label: f.name, project, notes: f.description, tags: countTags(f.tags),
             children: [...f.folders.map((x) => ovFolder(x, false)), ...f.files.map(ovFile)]
         });
         const projects = data.folders.map((f) => ovFolder(f, true));
@@ -813,6 +849,16 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         return out;
     };
 
+    /** The way up: every folder above, then the document and group for members. Each one is clickable. */
+    const crumbsOf = (n: Node) => {
+        const out: { id: string; label: string; kind: string }[] = [];
+        let f: LogFolder | undefined = n.kind === 'folder' ? parentOf.get(n.folder) : n.folder;
+        for (; f; f = parentOf.get(f)) out.unshift({ id: f.id, label: f.name, kind: 'folder' });
+        if (n.kind === 'group' || n.kind === 'member') out.push({ id: n.file.id, label: n.file.title || n.file.doc, kind: 'file' });
+        if (n.kind === 'member' && n.group) out.push({ id: n.group.id, label: n.group.name, kind: 'group' });
+        return out;
+    };
+
     const detailOf = (n: Node) => {
         if (n.kind === 'folder') {
             const contents = [
@@ -826,6 +872,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             ];
             return {
                 id: n.id, kind: 'folder', work: false, name: n.folder.name, description: n.folder.description, isProject: !n.parent,
+                tags: n.folder.tags ?? [], crumbs: crumbsOf(n),
                 path: pathOf(n.folder).slice(0, -1), counts: { docs: countFiles(n.folder), members: countMembers(n.folder) }, contents
             };
         }
@@ -833,6 +880,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             const ms = n.file.members.filter((m) => m.group === n.group.id);
             return {
                 id: n.id, kind: 'group', work: false, name: n.group.name, description: n.group.description, doc: n.file.doc,
+                tags: n.group.tags ?? [], crumbs: crumbsOf(n),
                 path: [...pathOf(n.folder), n.file.doc], counts: { members: ms.length }, contents: ms.map((m) => entryOfMember(n.file, m))
             };
         }
@@ -844,9 +892,16 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             doc: n.file.doc, docType: /\.cls$/i.test(n.file.doc) ? 'cls' : 'rtn',
             member: n.kind === 'member' ? { name: n.member.name, kind: n.member.kind } : undefined,
             group, ns: n.file.ns, server: n.file.server, nsOpen: !!folderFor(n.file.server, n.file.ns),
-            path: pathOf(n.folder),
+            path: pathOf(n.folder), crumbs: crumbsOf(n),
             contents: n.kind === 'file' ? membersOfFile(n.file) : undefined
         };
+    };
+
+    /** Where a node keeps its tags (folders and groups too). */
+    const tagHolder = (n: Node): { tags?: string[] } => {
+        const x: { tags?: string[] } = n.kind === 'folder' ? n.folder : n.kind === 'group' ? n.group : n.kind === 'file' ? n.file : n.member;
+        x.tags ??= [];
+        return x;
     };
 
     // ---- details panel: edits ----
@@ -885,18 +940,33 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 break;
             case 'addTag': {
                 const t = normalizeTag(String(msg.tag ?? ''));
-                if (!w || !t || w.tags.includes(t)) return;
-                w.tags.push(t);
+                const holder = tagHolder(n);
+                if (!t || holder.tags!.includes(t)) return;
+                holder.tags!.push(t);
                 break;
             }
-            case 'removeTag':
-                if (!w) return;
-                w.tags = w.tags.filter((t) => t !== msg.tag);
+            case 'removeTag': {
+                const holder = tagHolder(n);
+                holder.tags = holder.tags!.filter((t) => t !== msg.tag);
                 break;
+            }
             case 'renameTag': {
-                if (!w) return;
+                // Renames the tag everywhere in the log.
                 const t = normalizeTag(String(msg.to ?? ''));
-                w.tags = [...new Set(w.tags.map((x) => (x === msg.from ? t : x)).filter(Boolean))];
+                if (!t || !msg.from) return;
+                const fix = (x: { tags?: string[] }) => {
+                    if (x.tags?.includes(msg.from)) x.tags = [...new Set(x.tags.map((y) => (y === msg.from ? t : y)))];
+                };
+                const walk = (f: LogFolder) => {
+                    fix(f);
+                    f.folders.forEach(walk);
+                    for (const file of f.files) {
+                        fix(file);
+                        file.groups.forEach(fix);
+                        file.members.forEach(fix);
+                    }
+                };
+                data.folders.forEach(walk);
                 break;
             }
             case 'addJournal':
@@ -1331,15 +1401,122 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         changed();
     });
 
-    const saveJson = async (title: string, fileName: string, payload: unknown) => {
+    /** Save to a file or copy to the clipboard. Returns where it went ("to C:\\x.json" / "to the clipboard"). */
+    const saveJson = async (title: string, fileName: string, payload: unknown): Promise<string | undefined> => {
+        const how = await vscode.window.showQuickPick(
+            [
+                { label: '$(save) Save to file…', id: 'file' },
+                { label: '$(copy) Copy to clipboard', id: 'clip', detail: 'Paste it anywhere, e.g. into Import → From clipboard on another machine' }
+            ],
+            { title, placeHolder: 'Export to…' }
+        );
+        if (!how) return undefined;
+        const json = JSON.stringify(payload, null, 2);
+        if (how.id === 'clip') {
+            await vscode.env.clipboard.writeText(json);
+            return 'to the clipboard';
+        }
         const target = await vscode.window.showSaveDialog({
             title,
             defaultUri: vscode.Uri.file(path.join(desktopDir(), fileName)),
             filters: { JSON: ['json'] }
         });
         if (!target) return undefined;
-        await vscode.workspace.fs.writeFile(target, Buffer.from(JSON.stringify(payload, null, 2), 'utf8'));
-        return target;
+        await vscode.workspace.fs.writeFile(target, Buffer.from(json, 'utf8'));
+        return `to ${target.fsPath}`;
+    };
+
+    // ---- where imported JSON comes from: clipboard, a paste tab, or a file ----
+    type JsonSource = { text: string; label: string };
+    const readJsonFile = async (uri: vscode.Uri): Promise<JsonSource> => ({
+        text: Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8'),
+        label: uri.fsPath
+    });
+
+    /** The paste tab: an empty JSON editor with an Import button (editor title) and a notification button. */
+    const pasteWaiters = new Map<string, (ok: boolean) => void>();
+    const syncPasteContext = () => vscode.commands.executeCommand('setContext', 'isfsNamespaceSearch.codeLogPasteDocs', [...pasteWaiters.keys()]);
+    context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((d) => pasteWaiters.get(d.uri.toString())?.(false)));
+    const pasteJson = async (title: string): Promise<JsonSource | undefined> => {
+        const doc = await vscode.workspace.openTextDocument({ language: 'json', content: '' });
+        await vscode.window.showTextDocument(doc, { preview: false });
+        const key = doc.uri.toString();
+        const ok = await new Promise<boolean>((resolve) => {
+            pasteWaiters.set(key, resolve);
+            syncPasteContext();
+            vscode.window
+                .showInformationMessage(`${title}: paste the JSON into the new tab, then click Import (also at the top right of the tab).`, 'Import', 'Cancel')
+                .then((b) => resolve(b === 'Import'));
+        });
+        pasteWaiters.delete(key);
+        syncPasteContext();
+        if (!ok) return undefined;
+        const text = doc.getText();
+        // Close the tab without a "save?" question.
+        const ed = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === key);
+        if (ed) {
+            await vscode.window.showTextDocument(ed.document, ed.viewColumn);
+            await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+        }
+        return text.trim() ? { text, label: 'the pasted JSON' } : undefined;
+    };
+    reg('importPasted', (uri?: vscode.Uri) => {
+        const key = (uri ?? vscode.window.activeTextEditor?.document.uri)?.toString();
+        if (key) pasteWaiters.get(key)?.(true);
+    });
+
+    const chooseJsonSource = async (title: string): Promise<JsonSource | undefined> => {
+        const how = await vscode.window.showQuickPick(
+            [
+                { label: '$(clippy) From clipboard', id: 'clip', detail: 'Copy the JSON text (Ctrl+C) first' },
+                { label: '$(edit) Paste JSON…', id: 'paste', detail: 'Opens an empty tab to paste into' },
+                { label: '$(folder-opened) From file…', id: 'file' }
+            ],
+            { title, placeHolder: 'Import from…' }
+        );
+        if (!how) return undefined;
+        if (how.id === 'paste') return pasteJson(title);
+        if (how.id === 'file') {
+            const picked = await vscode.window.showOpenDialog({
+                title,
+                defaultUri: vscode.Uri.file(desktopDir()),
+                canSelectMany: false,
+                filters: { JSON: ['json'] }
+            });
+            return picked?.[0] ? readJsonFile(picked[0]) : undefined;
+        }
+        const text = (await vscode.env.clipboard.readText()).trim();
+        // A copied file path ("Copy as path" in Explorer, quotes and all) reads that file.
+        const asPath = text.replace(/^"(.*)"$/, '$1');
+        if (/\.json$/i.test(asPath) && !asPath.includes('\n')) {
+            try {
+                return await readJsonFile(vscode.Uri.file(asPath));
+            } catch {
+                // not a readable path - treat it as text below
+            }
+        }
+        if (!text) {
+            vscode.window.showWarningMessage(
+                'The clipboard has no text. Copy the JSON content itself (open the file, Ctrl+A, Ctrl+C) - a file copied in Explorer can\'t be read from the clipboard. Or use From file… / drop the file onto the Projects tree.'
+            );
+            return undefined;
+        }
+        return { text, label: 'the clipboard' };
+    };
+
+    const parseJson = (src: JsonSource): any => JSON.parse(src.text.replace(/^\uFEFF/, ''));
+
+    /** Whatever kind of export it is, run the matching import (tree or log). */
+    const importAuto = async (src: JsonSource) => {
+        let parsed: any;
+        try {
+            parsed = parseJson(src);
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Couldn't import ${src.label}: not valid JSON (${e?.message || e}).`);
+            return;
+        }
+        if (parsed?.format === LOG_FORMAT) await runImportLog(src);
+        else await runImport(src);
     };
 
     reg('export', async () => {
@@ -1348,7 +1525,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             scope: 'log',
             folders: data.folders.map((f) => stripWork(cloneFolderRaw(f)))
         });
-        if (target) vscode.window.showInformationMessage(`Code Log exported to ${target.fsPath}.`);
+        if (target) vscode.window.showInformationMessage(`Code Log exported ${target}.`);
     });
 
     // A project export is a log holding just that project, so Import reads both.
@@ -1361,7 +1538,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             scope: 'project',
             folders: [stripWork(cloneFolderRaw(n.folder))]
         });
-        if (target) vscode.window.showInformationMessage(`Project "${n.folder.name}" exported to ${target.fsPath}.`);
+        if (target) vscode.window.showInformationMessage(`Project "${n.folder.name}" exported ${target}.`);
     });
 
     // ---- log (Details) export / import ----
@@ -1379,6 +1556,85 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
         title: string;
         description: string;
     } & Work;
+
+    // ---- right-click menu on the Overview rows (webview/context) ----
+    const ctxNode = (ctx: any): Node | undefined => (typeof ctx?.id === 'string' ? nodes.get(ctx.id) : undefined);
+    const nameOf = (n: Node) =>
+        n.kind === 'folder' ? n.folder.name : n.kind === 'group' ? n.group.name : n.kind === 'file' ? n.file.title || n.file.doc : n.member.title || n.member.name;
+    const goToSub = async (ctx: any, sub: 'notes' | 'info') => {
+        const n = ctxNode(ctx);
+        if (!n) return;
+        await select(n.id);
+        details.send({ type: 'goto', id: n.id, sub });
+    };
+    reg('ovNotes', (ctx: any) => goToSub(ctx, 'notes'));
+    reg('ovInfo', (ctx: any) => goToSub(ctx, 'info'));
+    reg('ovStatus', async (ctx: any) => {
+        const n = ctxNode(ctx);
+        if (!n || (n.kind !== 'file' && n.kind !== 'member')) return;
+        const cur = (n.kind === 'file' ? n.file : n.member).status;
+        const opts: { label: string; status?: Status }[] = [
+            { label: '$(circle-filled) To check', status: 'check' },
+            { label: '$(circle-filled) In progress', status: 'progress' },
+            { label: '$(circle-filled) Done', status: 'ok' },
+            { label: '$(circle-filled) Needs fix', status: 'fix' },
+            { label: '$(circle-outline) No status' }
+        ];
+        const pick = await vscode.window.showQuickPick(
+            opts.map((o) => ({ ...o, description: o.status === cur ? '(current)' : '' })),
+            { placeHolder: `Status of ${nameOf(n)}` }
+        );
+        if (pick) await onViewMessage({ type: 'setStatus', id: n.id, status: pick.status ?? 'none' });
+    });
+    reg('ovTag', async (ctx: any) => {
+        const n = ctxNode(ctx);
+        if (!n) return;
+        const have = new Set(tagHolder(n).tags);
+        const all = new Map<string, number>();
+        const count = (x: { tags?: string[] }) => x.tags?.forEach((t) => all.set(t, (all.get(t) ?? 0) + 1));
+        const walk = (f: LogFolder) => {
+            count(f);
+            f.folders.forEach(walk);
+            f.files.forEach((file) => {
+                count(file);
+                file.groups.forEach(count);
+                file.members.forEach(count);
+            });
+        };
+        data.folders.forEach(walk);
+        const existing = [...all.entries()].filter(([t]) => !have.has(t)).sort((a, b) => b[1] - a[1]);
+        const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { tag: string }>();
+        qp.placeholder = `Tag ${nameOf(n)}: pick one or type a new tag`;
+        const base = existing.map(([t, c]) => ({ label: t, description: `${c} item(s)`, tag: t }));
+        qp.items = base;
+        qp.onDidChangeValue((v) => {
+            const t = normalizeTag(v);
+            const extra = t && !all.has(t) && !have.has(t) ? [{ label: `$(add) ${t}`, description: 'new tag', tag: t, alwaysShow: true }] : [];
+            qp.items = [...extra, ...base];
+        });
+        const tag = await new Promise<string | undefined>((resolve) => {
+            qp.onDidAccept(() => {
+                resolve(qp.selectedItems[0]?.tag ?? (normalizeTag(qp.value) || undefined));
+                qp.hide();
+            });
+            qp.onDidHide(() => resolve(undefined));
+            qp.show();
+        });
+        qp.dispose();
+        if (tag) await onViewMessage({ type: 'addTag', id: n.id, tag });
+    });
+    const addEntry = async (ctx: any, what: 'journal' | 'todo') => {
+        const n = ctxNode(ctx);
+        if (!n || (n.kind !== 'file' && n.kind !== 'member')) return;
+        const text = await vscode.window.showInputBox({
+            title: `${what === 'journal' ? 'Journal entry' : 'To-do'} for ${nameOf(n)}`,
+            prompt: what === 'journal' ? 'What happened / what did you find?' : 'What needs doing?',
+            ignoreFocusOut: true
+        });
+        if (text?.trim()) await onViewMessage({ type: what === 'journal' ? 'addJournal' : 'addTodo', id: n.id, text });
+    };
+    reg('ovJournal', (ctx: any) => addEntry(ctx, 'journal'));
+    reg('ovTodo', (ctx: any) => addEntry(ctx, 'todo'));
 
     reg('exportLog', async () => {
         if (!data.folders.length) {
@@ -1398,11 +1654,15 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             title: w.title, description: w.description, ...(w.status ? { status: w.status } : {}),
             tags: w.tags, journal: w.journal, todos: w.todos, created: w.created, edited: w.edited
         });
+        const folderTags: { path: string[]; tags: string[] }[] = [];
+        const groupTags: { path: string[]; server: string; ns: string; doc: string; group: string; tags: string[] }[] = [];
         const walk = (f: LogFolder, parentPath: string[]) => {
             const p = [...parentPath, f.name];
+            if (f.tags?.length) folderTags.push({ path: p, tags: f.tags });
             for (const file of f.files) {
                 const where = { path: p, server: file.server, ns: file.ns, doc: file.doc };
                 items.push({ ...where, ...workOf(file) });
+                for (const g of file.groups) if (g.tags?.length) groupTags.push({ ...where, group: g.name, tags: g.tags });
                 for (const m of file.members) {
                     const group = m.group ? file.groups.find((g) => g.id === m.group)?.name : undefined;
                     items.push({ ...where, member: { name: m.name, kind: m.kind }, ...(group ? { group } : {}), ...workOf(m) });
@@ -1417,25 +1677,25 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             version: 1,
             exported: new Date().toISOString(),
             scope: pick.f ? pick.f.name : 'all',
-            items
+            items,
+            folderTags,
+            groupTags
         });
-        if (target) vscode.window.showInformationMessage(`Log exported (${items.length} item(s)) to ${target.fsPath}.`);
+        if (target) vscode.window.showInformationMessage(`Log exported (${items.length} item(s)) ${target}.`);
     });
 
     reg('importLog', async () => {
-        const picked = await vscode.window.showOpenDialog({
-            title: 'Import Log',
-            defaultUri: vscode.Uri.file(desktopDir()),
-            canSelectMany: false,
-            filters: { JSON: ['json'] }
-        });
-        if (!picked?.[0]) return;
+        const src = await chooseJsonSource('Import Log');
+        if (src) await importAuto(src);
+    });
+
+    async function runImportLog(src: JsonSource) {
         let items: LogItem[];
+        let folderTags: { path: string[]; tags: string[] }[] = [];
+        let groupTags: { path: string[]; server: string; ns: string; doc: string; group: string; tags: string[] }[] = [];
         try {
-            const parsed = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(picked[0])).toString('utf8'));
-            if (parsed?.format !== LOG_FORMAT) {
-                throw new Error(isValidData(parsed) ? 'this is a Projects tree export - use Import in the Projects title bar' : 'not a Log export');
-            }
+            const parsed = parseJson(src);
+            if (parsed?.format !== LOG_FORMAT) throw new Error('not a Log export');
             items = (Array.isArray(parsed.items) ? parsed.items : [])
                 .filter((it: any) =>
                     Array.isArray(it?.path) && it.path.length && it.path.every((x: any) => typeof x === 'string' && x) &&
@@ -1449,11 +1709,17 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                     description: typeof it.description === 'string' ? it.description : '',
                     ...normalizeWork(it)
                 }));
+            const okPath = (x: any) => Array.isArray(x?.path) && x.path.length && x.path.every((y: any) => typeof y === 'string' && y);
+            folderTags = (Array.isArray(parsed.folderTags) ? parsed.folderTags : [])
+                .filter(okPath).map((x: any) => ({ path: x.path, tags: normalizeWork(x).tags }));
+            groupTags = (Array.isArray(parsed.groupTags) ? parsed.groupTags : [])
+                .filter((x: any) => okPath(x) && typeof x.server === 'string' && typeof x.ns === 'string' && typeof x.doc === 'string' && typeof x.group === 'string' && x.group)
+                .map((x: any) => ({ path: x.path, server: x.server, ns: String(x.ns).toUpperCase(), doc: x.doc, group: x.group, tags: normalizeWork(x).tags }));
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Couldn't import ${picked[0].fsPath}: ${e?.message || e}`);
+            vscode.window.showErrorMessage(`Couldn't import ${src.label}: ${e?.message || e}`);
             return;
         }
-        if (!items.length) {
+        if (!items.length && !folderTags.length && !groupTags.length) {
             vscode.window.showInformationMessage('That file has no log entries.');
             return;
         }
@@ -1556,12 +1822,24 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
             else if (overwrite.has(it)) summary.overwritten++;
             else summary.filled++;
         }
+        // Folder and group tags are added to yours (never removed).
+        const union = (x: { tags?: string[] }, tags: string[]) => (x.tags = [...new Set([...(x.tags ?? []), ...tags])]);
+        for (const ft of folderTags) union(ensureFolder(ft.path), ft.tags);
+        for (const gt of groupTags) {
+            const file = addFile(ensureFolder(gt.path), gt.server, gt.ns, gt.doc);
+            let g = file.groups.find((x) => x.name === gt.group);
+            if (!g) {
+                g = { id: newId(), name: gt.group, description: '', tags: [] };
+                file.groups.push(g);
+            }
+            union(g, gt.tags);
+        }
         selected = selected && nodes.get(selected.id);
         changed();
         vscode.window.showInformationMessage(
             `Log imported: ${summary.added} added, ${summary.filled} filled in, ${summary.overwritten} overwritten, ${summary.kept} kept as yours.`
         );
-    });
+    }
 
     /**
      * A project file: tick which subfolders / documents to take. If you already
@@ -1663,25 +1941,22 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
     };
 
     reg('import', async () => {
-        const picked = await vscode.window.showOpenDialog({
-            title: 'Import Code Log or project',
-            defaultUri: vscode.Uri.file(desktopDir()),
-            canSelectMany: false,
-            filters: { JSON: ['json'] }
-        });
-        if (!picked?.[0]) return;
+        const src = await chooseJsonSource('Import Projects (whole log or one project)');
+        if (src) await importAuto(src);
+    });
+
+    async function runImport(src: JsonSource) {
         let incoming: LogData;
         let isProject: boolean;
         try {
-            const parsed = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(picked[0])).toString('utf8'));
-            if (!isValidData(parsed)) throw new Error('not a Code Log export');
-            if (parsed.format === LOG_FORMAT) throw new Error('this is a Code Log export - use Import Log in the Code Log panel');
+            const parsed = parseJson(src);
+            if (!isValidData(parsed)) throw new Error('not a Projects or Code Log export');
             incoming = normalize(parsed);
             // The tree carries titles and notes only; status, tags, journal and to-dos come via Import Log.
             incoming.folders.forEach(stripWork);
             isProject = parsed.scope === 'project' || (parsed.scope === undefined && incoming.folders.length === 1);
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Couldn't import ${picked[0].fsPath}: ${e?.message || e}`);
+            vscode.window.showErrorMessage(`Couldn't import ${src.label}: ${e?.message || e}`);
             return;
         }
         // Fresh ids, so nothing imported can collide with what's already here.
@@ -1755,7 +2030,7 @@ export function registerCodeLog(context: vscode.ExtensionContext, log: Logger) {
                 summary.replaced.length ? `Overwritten: ${summary.replaced.join(', ')}.` : ''
             ].filter(Boolean).join(' ')
         );
-    });
+    }
 }
 
 function cloneFolderRaw(f: LogFolder): LogFolder {
@@ -1796,6 +2071,7 @@ function mergeFolders(target: LogFolder[], incoming: LogFolder[]) {
             continue;
         }
         f.description ||= inF.description;
+        f.tags = [...new Set([...(f.tags ?? []), ...(inF.tags ?? [])])];
         mergeFolders(f.folders, inF.folders);
         mergeFiles(f.files, inF.files);
     }
@@ -1820,6 +2096,7 @@ function mergeFile(file: LogFile, inFile: LogFile) {
         const g = file.groups.find((x) => x.name === inG.name);
         if (g) {
             g.description ||= inG.description;
+            g.tags = [...new Set([...(g.tags ?? []), ...(inG.tags ?? [])])];
             groupMap.set(inG.id, g.id);
         } else {
             file.groups.push(inG);
@@ -1860,6 +2137,10 @@ function carryWorkFiles(oldFiles: LogFile[], newFiles: LogFile[]) {
         const of = oldFiles.find((x) => sameDoc(x, nf.server, nf.ns, nf.doc));
         if (!of) continue;
         copyWork(of, nf);
+        for (const ng of nf.groups) {
+            const og = of.groups.find((x) => x.name === ng.name);
+            if (og?.tags?.length) ng.tags = [...og.tags];
+        }
         for (const nm of nf.members) {
             const om = of.members.find((x) => x.name === nm.name);
             if (om) copyWork(om, nm);
@@ -1871,11 +2152,12 @@ function carryWorkFiles(oldFiles: LogFile[], newFiles: LogFile[]) {
 function carryWorkFolder(oldF: LogFolder, newF: LogFolder) {
     const all = (f: LogFolder): LogFile[] => [...f.files, ...f.folders.flatMap(all)];
     const oldFiles = all(oldF);
-    const walk = (f: LogFolder) => {
+    const walk = (f: LogFolder, o: LogFolder | undefined) => {
+        if (o?.tags?.length) f.tags = [...o.tags];
         carryWorkFiles(oldFiles, f.files);
-        f.folders.forEach(walk);
+        f.folders.forEach((sub) => walk(sub, o?.folders.find((x) => x.name === sub.name)));
     };
-    walk(newF);
+    walk(newF, oldF);
 }
 
 function escapeMd(s: string): string {

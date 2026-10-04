@@ -1,5 +1,36 @@
 # Change Log
 
+## [1.7.15]
+
+- Import without files: **From clipboard**, **Paste JSON…** (a tab to paste into, with an Import button) or
+  **From file…**. A copied file path in the clipboard reads that file.
+- Export to the clipboard: every export offers **Save to file…** or **Copy to clipboard**.
+- Drop a `.json` export (or JSON text) onto the Projects tree to import it.
+- Import and Import Log each accept both kinds of export and run the matching import.
+
+## [1.7.14]
+
+- The Code Log panel always loads its latest page files, so an update shows up right away (VS Code could keep
+  showing a cached older page).
+
+## [1.7.13]
+
+- Overview **project picker**: All projects or one. Status / to-do counts, the tag list and all filters follow it.
+  Remembered between sessions.
+- The top stays in place while scrolling: in Item the path, title, status, tags and sub-tabs; in Overview the filter
+  row. Only the part below scrolls. A very short panel scrolls as a whole.
+
+## [1.7.12]
+
+- Overview **right-click menu**: Go to Notes, Go to Info, Add a Tag… on every row; Change Status…, Add Journal Entry…
+  and Add To-Do Entry… on documents and labels / methods.
+- Overview **tag filter** is now a multi-select drop-down with a search box (items with any ticked tag show).
+- **Tags on projects, folders and groups** too. Filtering by such a tag shows everything inside it. Log export / import
+  carries them (imported tags are added to yours).
+- Renaming a tag (double-click) now renames it everywhere in the log.
+- The path at the top of the Item tab is clickable: go up to any folder, the document or the group.
+- Status "Understood" is now **Done**.
+
 ## [1.7.11]
 
 - The To-do tab counter now shows **done / total** (1/1 when everything is done).

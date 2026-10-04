@@ -41,6 +41,11 @@ export class CodeLogView implements vscode.WebviewViewProvider {
         this.post();
     }
 
+    /** A one-off instruction for the page (e.g. switch to a sub-tab). */
+    send(msg: unknown) {
+        this.view?.webview.postMessage(msg);
+    }
+
     private post() {
         if (this.lastState === undefined) return;
         this.view?.webview.postMessage({ type: 'state', state: this.lastState, reason: this.lastReason });
@@ -48,8 +53,11 @@ export class CodeLogView implements vscode.WebviewViewProvider {
 
     private html(webview: vscode.Webview, media: vscode.Uri): string {
         const nonce = Array.from({ length: 24 }, () => Math.random().toString(36)[2]).join('');
-        const css = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codeLogView.css'));
-        const js = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codeLogView.js'));
+        // A fresh query string on every load, so VS Code never serves an older cached copy of the page
+        // after the extension is updated.
+        const bust = `v=${Date.now().toString(36)}`;
+        const css = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codeLogView.css')).with({ query: bust });
+        const js = webview.asWebviewUri(vscode.Uri.joinPath(media, 'codeLogView.js')).with({ query: bust });
         return `<!DOCTYPE html>
 <html lang="en">
 <head>

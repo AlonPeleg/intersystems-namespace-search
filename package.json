@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.7.11",
+  "version": "1.7.15",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -377,6 +377,42 @@
         "title": "Import Log (JSON)...",
         "category": "Code Log",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.ovNotes",
+        "title": "Go to Notes",
+        "category": "Code Log"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.ovInfo",
+        "title": "Go to Info",
+        "category": "Code Log"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.ovStatus",
+        "title": "Change Status…",
+        "category": "Code Log"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.ovTag",
+        "title": "Add a Tag…",
+        "category": "Code Log"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.ovJournal",
+        "title": "Add Journal Entry…",
+        "category": "Code Log"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.ovTodo",
+        "title": "Add To-Do Entry…",
+        "category": "Code Log"
+      },
+      {
+        "command": "isfsNamespaceSearch.codeLog.importPasted",
+        "title": "Import this JSON",
+        "category": "Code Log",
+        "icon": "$(check)"
       }
     ],
     "menus": {
@@ -459,6 +495,34 @@
         },
         {
           "command": "isfsNamespaceSearch.codeLog.chooseGroupMembers",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovNotes",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovInfo",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovStatus",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovTag",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovJournal",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovTodo",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.importPasted",
           "when": "false"
         }
       ],
@@ -611,6 +675,45 @@
           "command": "isfsNamespaceSearch.codeLog.addFromEditor",
           "when": "resourceScheme =~ /^isfs/",
           "group": "z_isfs@1"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovNotes",
+          "when": "webviewId == 'isfsNamespaceSearch.codeLogDetails' && webviewSection == 'ovrow'",
+          "group": "1_go@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovInfo",
+          "when": "webviewId == 'isfsNamespaceSearch.codeLogDetails' && webviewSection == 'ovrow'",
+          "group": "1_go@2"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovStatus",
+          "when": "webviewId == 'isfsNamespaceSearch.codeLogDetails' && webviewSection == 'ovrow' && ovWork",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovTag",
+          "when": "webviewId == 'isfsNamespaceSearch.codeLogDetails' && webviewSection == 'ovrow'",
+          "group": "2_edit@2"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovJournal",
+          "when": "webviewId == 'isfsNamespaceSearch.codeLogDetails' && webviewSection == 'ovrow' && ovWork",
+          "group": "3_add@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.codeLog.ovTodo",
+          "when": "webviewId == 'isfsNamespaceSearch.codeLogDetails' && webviewSection == 'ovrow' && ovWork",
+          "group": "3_add@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "isfsNamespaceSearch.codeLog.importPasted",
+          "when": "resource in isfsNamespaceSearch.codeLogPasteDocs",
+          "group": "navigation"
         }
       ]
     },

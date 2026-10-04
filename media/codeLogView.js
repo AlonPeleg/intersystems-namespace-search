@@ -8,7 +8,7 @@
     const STATUS = {
         check: { label: 'To check', cls: 's-check' },
         progress: { label: 'In progress', cls: 's-progress' },
-        ok: { label: 'Understood', cls: 's-ok' },
+        ok: { label: 'Done', cls: 's-ok' },
         fix: { label: 'Needs fix', cls: 's-fix' }
     };
     const STATUS_ORDER = ['fix', 'progress', 'check', 'ok'];
@@ -20,7 +20,10 @@
         sub: saved.sub || 'notes', // notes | journal | todo | info
         lastSelected: null,
         expanded: new Set(saved.expanded || []),
-        filter: { status: new Set(), todos: false, tag: '' },
+        project: saved.project || '', // Overview scope: '' = all projects, else a project id
+        filter: { status: new Set(), todos: false, tags: new Set() },
+        tagMenu: false, // the tag filter drop-down
+        tagSearch: '',
         editingNotes: false,
         editingJournal: null,
         editingTodo: null,
@@ -33,7 +36,7 @@
     let toastTimer;
 
     const post = (msg) => vscode.postMessage(msg);
-    const persistUi = () => vscode.setState({ sub: ui.sub, expanded: [...ui.expanded] });
+    const persistUi = () => vscode.setState({ sub: ui.sub, expanded: [...ui.expanded], project: ui.project });
 
     // ---------- tiny DOM helper ----------
     function h(tag, props, ...kids) {
@@ -97,8 +100,15 @@
 
     // ---------- rendering ----------
     let rendering = false; // blurs caused by our own DOM rebuild are ignored
+    const pageScroller = () => document.scrollingElement || document.documentElement;
+    // Which scroll position to keep: same tab + same item / sub-tab (or same project) keeps it.
+    const scrollKey = () => (ui.main === 'item' ? `item:${state.selected ? state.selected.id : ''}:${ui.sub}` : `ov:${ui.project}`);
+    let lastScrollKey = '';
     function render() {
-        const scroll = document.scrollingElement.scrollTop;
+        const scroll = pageScroller().scrollTop;
+        const inner = root.querySelector('.scroll');
+        const innerTop = inner ? inner.scrollTop : 0;
+        const sameView = scrollKey() === lastScrollKey;
         const prev = document.activeElement && document.activeElement.id && root.contains(document.activeElement) ? '#' + document.activeElement.id : null;
         rendering = true;
         try { root.textContent = ''; } finally { rendering = false; }
@@ -109,7 +119,10 @@
             )
         );
         root.append(ui.main === 'overview' ? renderOverview() : renderItem());
-        document.scrollingElement.scrollTop = scroll;
+        pageScroller().scrollTop = sameView ? scroll : 0;
+        const scroller = root.querySelector('.scroll');
+        if (scroller && sameView) scroller.scrollTop = innerTop;
+        lastScrollKey = scrollKey();
         const want = ui.focusAfter || prev;
         if (want) {
             const el = root.querySelector(want);
@@ -125,13 +138,16 @@
     function renderItem() {
         const s = state.selected;
         if (!s) return h('div', { class: 'empty', text: 'Select a folder, document or label / method in Projects above to see its log.' });
-        const wrap = h('div');
-        wrap.append(renderHeader(s));
+        // Path, title, status, tags and sub-tabs stay put; only the pane below scrolls.
+        const wrap = h('div', { class: 'view' });
+        const top = h('div', { class: 'fixed' });
+        wrap.append(top);
+        top.append(renderHeader(s));
         const tabs = s.work
             ? [['notes', 'Notes'], ['journal', 'Journal', s.journal.length || ''], ['todo', 'To-do', s.todos.length ? `${s.todos.filter((t) => t.done).length}/${s.todos.length}` : ''], ['info', 'Info']]
             : [['notes', 'Notes'], ['info', 'Info']];
         if (!tabs.some(([k]) => k === ui.sub)) ui.sub = 'notes';
-        wrap.append(
+        top.append(
             h('div', { class: 'subtabs' },
                 tabs.map(([k, label, c]) =>
                     h('button', { class: ui.sub === k ? 'on' : '', onclick: () => { ui.sub = k; persistUi(); render(); } }, label, c ? h('span', { class: 'cnt', text: String(c), title: k === 'todo' ? 'done / total' : '' }) : null)
@@ -143,13 +159,22 @@
         else if (ui.sub === 'journal') pane.append(renderJournal(s));
         else if (ui.sub === 'todo') pane.append(renderTodos(s));
         else pane.append(renderInfo(s));
-        wrap.append(pane);
+        wrap.append(h('div', { class: 'scroll' }, pane));
         return wrap;
     }
 
     function renderHeader(s) {
         const hdr = h('div', { class: 'hdr' });
-        if (s.path.length) hdr.append(h('div', { class: 'path', dir: 'auto', text: s.path.join(' › ') }));
+        // The way up: each part of the path opens that folder / document / group.
+        const crumbs = s.crumbs || [];
+        if (crumbs.length) {
+            const path = h('div', { class: 'path' });
+            crumbs.forEach((c, i) => {
+                if (i) path.append(' › ');
+                path.append(h('span', { class: 'crumb', dir: 'auto', text: c.label, title: `Go up to ${c.label}`, onclick: () => post({ type: 'select', id: c.id }) }));
+            });
+            hdr.append(path);
+        }
         const field = s.work ? 'title' : 'name';
         const value = s.work ? s.title : s.name;
         const title = h('input', {
@@ -164,6 +189,7 @@
         hdr.append(title);
         if (!s.work) {
             hdr.append(h('div', { class: 'small muted', text: s.kind === 'group' ? `Group in ${s.doc}` : s.isProject ? 'Project' : 'Folder' }));
+            hdr.append(renderTags(s));
             return hdr;
         }
         // status + link to the code
@@ -441,15 +467,17 @@
 
     // ----- Overview -----
     const isWork = (n) => n.kind === 'file' || n.kind === 'member';
-    const matches = (n) => {
+    const hasTag = (n) => (n.tags || []).some((t) => ui.filter.tags.has(t));
+    // `inherited`: a folder / document / group above this row carries one of the filter tags.
+    const matches = (n, inherited) => {
         const f = ui.filter;
-        if (!isWork(n)) return false;
+        if (!isWork(n)) return f.tags.size > 0 && !f.status.size && !f.todos && hasTag(n);
         if (f.status.size && !f.status.has(n.status || 'none')) return false;
         if (f.todos && !n.openTodos) return false;
-        if (f.tag && !(n.tags || []).includes(f.tag)) return false;
+        if (f.tags.size && !inherited && !hasTag(n)) return false;
         return true;
     };
-    const filtering = () => ui.filter.status.size > 0 || ui.filter.todos || !!ui.filter.tag;
+    const filtering = () => ui.filter.status.size > 0 || ui.filter.todos || ui.filter.tags.size > 0;
 
     function collect(n, out) {
         if (isWork(n)) out.push(n);
@@ -458,19 +486,44 @@
     }
 
     function renderOverview() {
-        const wrap = h('div');
-        const all = state.projects.flatMap((p) => collect(p, []));
+        const wrap = h('div', { class: 'view' });
         if (!state.projects.length) {
             wrap.append(h('div', { class: 'empty', text: 'No projects yet. Create one with New Folder in the Projects title bar.' }));
             return wrap;
         }
+        // Scope: one project or all of them. Counts, tags and filters all follow it.
+        if (ui.project && !state.projects.some((p) => p.id === ui.project)) ui.project = '';
+        const roots = ui.project ? state.projects.filter((p) => p.id === ui.project) : state.projects;
+        const all = roots.flatMap((p) => collect(p, []));
+        const tagCount = new Map();
+        const countTags = (n) => {
+            (n.tags || []).forEach((t) => tagCount.set(t, (tagCount.get(t) || 0) + 1));
+            (n.children || []).forEach(countTags);
+        };
+        roots.forEach(countTags);
+        const scopeTags = [...tagCount.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([tag, count]) => ({ tag, count }));
         const counts = { check: 0, progress: 0, ok: 0, fix: 0 };
         let openTodos = 0;
         for (const n of all) {
             if (n.status) counts[n.status]++;
             openTodos += n.openTodos || 0;
         }
-        const chips = h('div', { class: 'chips' });
+        const chips = h('div', { class: 'chips fixed' });
+        chips.append(h('select', {
+            class: 'projsel' + (ui.project ? ' on' : ''), title: 'Which project the Overview shows',
+            onchange: (e) => {
+                ui.project = e.target.value;
+                // Drop tag filters that don't exist in the new scope.
+                const inScope = new Set();
+                const walkTags = (n) => { (n.tags || []).forEach((t) => inScope.add(t)); (n.children || []).forEach(walkTags); };
+                (ui.project ? state.projects.filter((p) => p.id === ui.project) : state.projects).forEach(walkTags);
+                [...ui.filter.tags].forEach((t) => { if (!inScope.has(t)) ui.filter.tags.delete(t); });
+                persistUi();
+                render();
+            }
+        },
+            h('option', { value: '', text: 'All projects', selected: !ui.project }),
+            state.projects.map((p) => h('option', { value: p.id, text: p.label, selected: ui.project === p.id }))));
         for (const k of STATUS_ORDER) {
             const on = ui.filter.status.has(k);
             chips.append(h('button', {
@@ -482,35 +535,66 @@
             class: 'chip' + (ui.filter.todos ? ' on' : ''), title: 'Only items with open to-dos',
             onclick: () => { ui.filter.todos = !ui.filter.todos; render(); }
         }, '☐ ' + openTodos));
-        if (state.tags.length) {
-            const sel = h('select', { title: 'Filter by tag', onchange: (e) => { ui.filter.tag = e.target.value; render(); } },
-                h('option', { value: '', text: '#tags' }),
-                state.tags.map((t) => h('option', { value: t.tag, text: `${t.tag} (${t.count})`, selected: ui.filter.tag === t.tag })));
-            if (ui.filter.tag) sel.classList.add('on');
-            chips.append(sel);
-        }
+        if (scopeTags.length) chips.append(renderTagFilter(scopeTags));
         wrap.append(chips);
 
+        const scroller = h('div', { class: 'scroll' });
         const list = h('div', { style: 'padding:0 4px 8px' });
         const f = filtering();
         let shown = 0;
-        const keep = (n) => (f ? matches(n) || (n.children || []).some(keep) : true);
-        const walk = (n, depth) => {
-            if (!keep(n)) return;
-            if (f && matches(n)) shown++;
-            const kids = (n.children || []).filter(keep);
+        const passDown = (n, inh) => inh || (ui.filter.tags.size > 0 && hasTag(n));
+        const keep = (n, inh) => (f ? matches(n, inh) || (n.children || []).some((c) => keep(c, passDown(n, inh))) : true);
+        const walk = (n, depth, inh) => {
+            if (!keep(n, inh)) return;
+            if (f && matches(n, inh)) shown++;
+            const down = passDown(n, inh);
+            const kids = (n.children || []).filter((c) => keep(c, down));
             const open = f || ui.expanded.has(n.id);
             list.append(renderOvRow(n, depth, kids.length > 0, open));
-            if (open) kids.forEach((c) => walk(c, depth + 1));
+            if (open) kids.forEach((c) => walk(c, depth + 1, down));
         };
-        state.projects.forEach((p) => walk(p, 0));
-        wrap.append(list);
+        roots.forEach((p) => walk(p, 0, false));
+        scroller.append(list);
+        wrap.append(scroller);
         if (f) {
-            wrap.append(h('div', { class: 'foot' },
+            scroller.append(h('div', { class: 'foot' },
                 h('span', { text: `${shown} matching · everything else hidden` }),
-                h('button', { class: 'link', text: 'clear', onclick: () => { ui.filter = { status: new Set(), todos: false, tag: '' }; render(); } })));
+                h('button', { class: 'link', text: 'clear', onclick: () => { ui.filter = { status: new Set(), todos: false, tags: new Set() }; render(); } })));
         }
         return wrap;
+    }
+
+    // Multi-select tag filter: a small drop-down with a search box. Ticked tags are OR-ed.
+    function renderTagFilter(scopeTags) {
+        const picked = ui.filter.tags;
+        const box = h('div', { class: 'tagfilter' });
+        const label = picked.size === 0 ? '# tags' : picked.size === 1 ? [...picked][0] : `# ${picked.size} tags`;
+        box.append(h('button', {
+            class: 'chip' + (picked.size ? ' on' : ''), title: 'Filter by tag',
+            onclick: (e) => { e.stopPropagation(); ui.tagMenu = !ui.tagMenu; if (ui.tagMenu) ui.focusAfter = '#tagsearch'; render(); }
+        }, label, ' ▾'));
+        if (!ui.tagMenu) return box;
+        const menu = h('div', { class: 'menu tagmenu' });
+        menu.append(h('input', {
+            id: 'tagsearch', class: 'taginput', placeholder: 'search tags…', value: ui.tagSearch, dir: 'auto',
+            oninput: (e) => { ui.tagSearch = e.target.value; render(); },
+            onkeydown: (e) => { if (e.key === 'Escape') { ui.tagMenu = false; render(); } }
+        }));
+        const q = ui.tagSearch.trim().replace(/^#/, '').toLowerCase();
+        const list = scopeTags.filter((t) => !q || t.tag.toLowerCase().includes(q));
+        const items = h('div', { class: 'tagitems' });
+        for (const t of list) {
+            const on = picked.has(t.tag);
+            items.append(h('button', {
+                class: 'tagitem' + (on ? ' cur' : ''),
+                onclick: (e) => { e.stopPropagation(); on ? picked.delete(t.tag) : picked.add(t.tag); ui.focusAfter = '#tagsearch'; render(); }
+            }, h('span', { class: 'box' + (on ? ' done' : ''), text: on ? '✓' : '' }), h('span', { class: 'ttext', dir: 'auto', text: t.tag }), h('span', { class: 'muted small', text: String(t.count) })));
+        }
+        if (!list.length) items.append(h('div', { class: 'muted small', style: 'padding:4px 8px', text: 'No matching tags' }));
+        menu.append(items);
+        if (picked.size) menu.append(h('button', { class: 'link small', style: 'padding:4px 8px', text: 'clear tags', onclick: (e) => { e.stopPropagation(); picked.clear(); render(); } }));
+        box.append(menu);
+        return box;
     }
 
     function renderOvRow(n, depth, hasKids, open) {
@@ -522,6 +606,8 @@
         };
         const row = h('div', {
             class: 'ovrow' + (sel ? ' sel' : ''), style: `padding-left:${4 + depth * 14}px`,
+            // Right-click menu (package.json webview/context): Go to Notes / Info, Status, Tag, Journal, To-do.
+            'data-vscode-context': JSON.stringify({ webviewSection: 'ovrow', ovWork: isWork(n), id: n.id, preventDefaultContextMenuItems: true }),
             title: tooltip(n) + '\n(double-click to open it in Item)',
             // One click: open / close (or just highlight a row with nothing inside). Double click: show it in Item.
             onclick: (e) => {
@@ -614,6 +700,10 @@
             ui.statusMenu = false;
             render();
         }
+        if (ui.tagMenu && !e.target.closest('.tagfilter')) {
+            ui.tagMenu = false;
+            render();
+        }
     });
     document.addEventListener('focusout', () => {
         setTimeout(() => {
@@ -626,6 +716,15 @@
 
     window.addEventListener('message', (e) => {
         const msg = e.data;
+        if (msg?.type === 'goto') {
+            // From the Overview right-click menu: Go to Notes / Go to Info.
+            ui.main = 'item';
+            ui.sub = msg.sub;
+            ui.ovSel = null;
+            persistUi();
+            render();
+            return;
+        }
         if (msg?.type !== 'state') return;
         const prevId = state.selected ? state.selected.id : null;
         state = msg.state;

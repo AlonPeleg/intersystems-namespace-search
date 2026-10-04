@@ -191,13 +191,20 @@ The sidebar has two sections: **Projects** (the tree) for organising and quick a
 below it, which holds the log itself in two tabs.
 
 *Overview* shows the whole log as a status tree. Each document and label / method shows its status dot, title and open
-to-dos; projects and folders roll up a small status bar and a count of open to-dos (☐). Filter by status with the
-chips, by **☐ open to-dos**, or by **#tag**. Parents of a match stay visible. Click a row to open or close it;
-double-click it to show it in the Item tab.
+to-dos; projects and folders roll up a small status bar and a count of open to-dos (☐). The **project picker** at the
+start of the filter row shows **All projects** or just one; the counts, tags and filters follow it. Filter by status with the
+chips, by **☐ open to-dos**, or by **# tags** (a drop-down with a search box; tick one or more tags, and items with
+any of them show). A tagged folder, document or group shows everything inside it. Parents of a match stay visible.
+Click a row to open or close it; double-click it to show it in the Item tab.
+
+Right-click a row for **Go to Notes**, **Go to Info** and **Add a Tag…** (any row), plus **Change Status…**,
+**Add Journal Entry…** and **Add To-Do Entry…** (documents and labels / methods).
+
 
 *Item* shows the entry you selected in the tree (selecting switches to this tab):
 
-- **Header**: the path, an editable **title**, the **status** (click the badge: To check, In progress, OK, Needs fix,
+- **Header**: the path (click any part to go up to it), an editable **title**, the **status** (click the badge:
+  To check, In progress, Done, Needs fix,
   or none), a link that opens the code, and the **tags**. **+ tag** adds one (existing tags are suggested),
   ✕ removes it, and double-clicking a tag renames it everywhere in the log.
 - **Notes**: click to edit. Supports `- ` / `* ` bullets, `1. ` numbered lists, `` `code` `` and `**bold**`.
@@ -210,8 +217,11 @@ double-click it to show it in the Item tab.
 For projects, folders and groups, Info lists what's inside (subfolders and documents, or the group's members).
 Click a row to show it; ↗ opens the code.
 
-Status, tags, journal and to-dos are for documents and labels / methods. Projects, folders and groups have a name
-and notes only.
+Status, journal and to-dos are for documents and labels / methods. Projects, folders and groups have a name, notes
+and tags.
+
+The top of the panel stays in place while you scroll: in Item the path, title, status, tags and sub-tabs; in Overview
+the filter row. Only the part below scrolls. (If the panel is very short, everything scrolls together instead.)
 
 Changes save as you type. Text direction follows what you type, so Hebrew works as expected.
 
@@ -248,7 +258,17 @@ The log is saved in VS Code on this computer. There are two kinds of export:
 - **Import Log** creates any missing projects, folders, documents, groups and labels / methods in the tree. If some
   items already have a log of their own, it asks once: **Overwrite all**, **Keep mine**, or **Choose…** (a checklist).
 
-Export and import dialogs open on your Desktop and save to / read from your own computer.
+**Without files (handy on servers or over RDP)**
+
+- Every export asks **Save to file…** or **Copy to clipboard**.
+- Every import asks **From clipboard**, **Paste JSON…** (an empty tab to paste into, with an **Import** button at its
+  top right) or **From file…**. Copy the JSON *text* (Ctrl+C); a file copied in Explorer can't be read from the
+  clipboard, but a copied file *path* (Explorer's "Copy as path") is read as that file.
+- Drop a `.json` export (or dragged JSON text) onto the **Projects** tree to import it.
+- Either import button takes either kind of export: a Code Log export given to **Import** (or a Projects export given
+  to **Import Log**) runs the right import.
+
+File dialogs open on your Desktop and save to / read from your own computer.
 
 ## Settings
 
