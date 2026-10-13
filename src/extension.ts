@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { authHeaders, forgetAllSessions, forgetSession, rememberCookies, sessionKey, setSessionLog } from './httpSession';
 import * as http from 'http';
 import * as https from 'https';
 import { registerGoTo } from './goto';
@@ -310,11 +311,33 @@ function findMemberDeclarationLineIndex(sourceLines: string[], member: string, i
     return null;
 }
 
-function httpGetJson(
+// One login per server (httpSession.ts): the session cookie when there is one; on a 401 for an expired session, once
+// more with the username and password.
+async function httpGetJson(
+    urlString: string,
+    authHeader: string,
+    allowSelfSigned: boolean,
+    token: vscode.CancellationToken
+): Promise<any> {
+    const key = sessionKey(urlString, authHeader);
+    const first = authHeaders(key, authHeader);
+    try {
+        return await httpGetJsonOnce(urlString, { Accept: 'application/json', ...first.headers }, allowSelfSigned, token, key, first.usedSession);
+    } catch (e: any) {
+        if (!(first.usedSession && e?.status === 401)) throw e;
+        forgetSession(key);
+        const again = authHeaders(key, authHeader);
+        return httpGetJsonOnce(urlString, { Accept: 'application/json', ...again.headers }, allowSelfSigned, token, key, again.usedSession);
+    }
+}
+
+function httpGetJsonOnce(
     urlString: string,
     headers: Record<string, string>,
     allowSelfSigned: boolean,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    sessKey: string,
+    usedSession: boolean
 ): Promise<any> {
     return new Promise((resolve, reject) => {
         let settled = false;
@@ -338,10 +361,13 @@ function httpGetJson(
                 settled = true;
                 const body = Buffer.concat(chunks).toString('utf8');
                 const status = res.statusCode || 0;
-                log(`  HTTP ${status} response, ${body.length} bytes.`);
+                log(`  HTTP ${status} response, ${body.length} bytes${usedSession ? ' (reused session)' : ''}.`);
+                if (!(status === 401 && usedSession)) rememberCookies(sessKey, res.headers, usedSession);
                 if (status < 200 || status >= 300) {
                     log(`  Response body (truncated): ${body.slice(0, 500)}`);
-                    reject(new Error(`HTTP ${status}: ${body.slice(0, 300)}`));
+                    const err: any = new Error(`HTTP ${status}: ${body.slice(0, 300)}`);
+                    err.status = status;
+                    reject(err);
                     return;
                 }
                 try {
@@ -438,7 +464,7 @@ async function runServerSideSearch(
 
     log(`Requesting: ${url}`);
 
-    const json = await httpGetJson(url, { Authorization: connection.authHeader, Accept: 'application/json' }, allowSelfSigned, token);
+    const json = await httpGetJson(url, connection.authHeader, allowSelfSigned, token);
 
     log(`Response top-level keys: [${Object.keys(json || {}).join(', ')}]`);
 
@@ -575,6 +601,7 @@ async function runServerSideSearch(
 export function activate(context: vscode.ExtensionContext) {
     output = vscode.window.createOutputChannel('ISFS Namespace Search');
     context.subscriptions.push(output);
+    setSessionLog(log);
 
     const provider = new ISFSSearchWebviewProvider(context.extensionUri);
 
@@ -583,6 +610,13 @@ export function activate(context: vscode.ExtensionContext) {
             webviewOptions: {
                 retainContextWhenHidden: true
             }
+        }),
+        // Ctrl+Alt+S: open the search; with text selected in the editor, that text goes into the search box (the file
+        // mask goes back to empty) and it waits for Enter.
+        vscode.commands.registerCommand('isfsNamespaceSearch.openSearch', async () => {
+            const text = selectedSearchText();
+            if (text !== undefined) provider.prefill(text);
+            await vscode.commands.executeCommand('workbench.view.extension.isfsNamespaceSearchContainer');
         })
     );
 
@@ -603,7 +637,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Password lookup shared by Open Document and server-side search.
     start('password lookup', () => {
         registerCredentials(context);
-        context.subscriptions.push(onDidChangeCredentials(() => connectionCache.clear()));
+        context.subscriptions.push(onDidChangeCredentials(() => { connectionCache.clear(); forgetAllSessions(); }));
     });
 
     // Open InterSystems Document with a Tree <-> Flat toggle - separate module.
@@ -655,8 +689,25 @@ function getIsfsNamespaces(): NamespaceDescriptor[] {
     return getIsfsWorkspaceFolders().map(f => ({ id: f.uri.toString(), label: f.name }));
 }
 
+/** The editor's selection as one line of search text (a multi-line selection: its first non-empty line), or undefined
+ *  when nothing is selected. */
+function selectedSearchText(): string | undefined {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.selection.isEmpty) return undefined;
+    const line = editor.document.getText(editor.selection).split(/\r?\n/).map(l => l.trim()).find(l => l !== '');
+    return line === undefined ? undefined : line;
+}
+
 class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
+    private _ready = false;
+    private _pendingPrefill: string | undefined;
+
+    /** Puts text into the search box (the view may not exist yet: then it is sent once the view is ready). */
+    public prefill(query: string) {
+        if (this._view && this._ready) this._view.webview.postMessage({ type: 'prefill', query });
+        else this._pendingPrefill = query;
+    }
     // One search can now run per namespace tab at a time, so cancellation is
     // tracked per namespace instead of a single shared token.
     private _cancellationTokenSources = new Map<string, vscode.CancellationTokenSource>();
@@ -669,6 +720,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken
     ) {
         this._view = webviewView;
+        this._ready = false;
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -681,6 +733,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             this.postNamespaceList();
         });
         webviewView.onDidDispose(() => {
+            this._ready = false;
             workspaceFoldersListener.dispose();
             this.cancelAllSearches();
         });
@@ -699,8 +752,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
                 case 'ready': {
+                    this._ready = true;
                     this.postNamespaceList();
                     this.focusQueryInput();
+                    if (this._pendingPrefill !== undefined) {
+                        webviewView.webview.postMessage({ type: 'prefill', query: this._pendingPrefill });
+                        this._pendingPrefill = undefined;
+                    }
                     break;
                 }
                 case 'startSearch': {
@@ -2235,6 +2293,16 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
             if (msg.type === 'focusQuery') {
                 queryInput.focus();
+                return;
+            }
+
+            // Ctrl+Alt+S with text selected in the editor: that text in the box, the mask back to empty, then wait
+            if (msg.type === 'prefill') {
+                queryInput.value = msg.query || '';
+                restoreMaskInputs(DEFAULT_MASKS, true);      // as in a new namespace: default mask (*.cls,*.mac,*.int)
+                saveState();
+                queryInput.focus();
+                queryInput.setSelectionRange(queryInput.value.length, queryInput.value.length);
                 return;
             }
 

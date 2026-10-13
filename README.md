@@ -21,6 +21,8 @@ It works with the server-side (`isfs`) namespace folders you open through the In
 
 Opens the **ISFS Search** panel in the Activity Bar.
 
+With text selected in the editor, `Ctrl+Alt+S` puts that text in **Search Text** (the first line of a multi-line selection), sets the file mask back to the default and waits for Enter. With nothing selected it opens the panel as it was.
+
 1. **Namespace**: pick which open namespace folder to search. Each namespace keeps its own search text, masks and results, so you can switch between them without losing anything.
 2. **Search Text**: case-insensitive. With **Use wildcards** on, `*` matches any characters and `?` matches one. Turn it off to search for a literal `*` or `?`.
 3. **File Mask / Package**: limit where to search.
@@ -47,9 +49,11 @@ It automatically falls back to a **local scan**, which lists folders and reads e
 
 To see which path a search took and why, open **View → Output → ISFS Namespace Search**.
 
+The server is logged in to once: the session it returns is reused for the next searches and Open Document listings (like the InterSystems extension does), and a new login happens only when that session has expired on the server.
+
 ## Go To: `Ctrl+Alt+G`
 
-Studio's Go To dialog. It pre-fills with the reference under your cursor, or your selection.
+Studio's Go To dialog. It pre-fills with your selection (the first line of a multi-line selection), else the reference under your cursor, and waits for Enter.
 
 | You type | It opens |
 |---|---|

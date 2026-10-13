@@ -1,5 +1,14 @@
 # Change Log
 
+## [1.7.16]
+
+- **One login per server.** Server-side search and Open Document's lists now reuse the session the server returns
+  (as the InterSystems extension does) instead of logging in again on every request. When the session expires on the
+  server, it logs in again once by itself. The Output channel says when it logged in.
+- **Ctrl+Alt+S with text selected** puts that text in Search Text (first line of a multi-line selection), sets the file
+  mask back to the default and waits. With nothing selected it opens the panel as before.
+- **Go To with a multi-line selection** fills in its first line (it used to ignore the selection).
+
 ## [1.7.15]
 
 - Import without files: **From clipboard**, **Paste JSON…** (a tab to paste into, with an Import button) or

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { authHeaders, forgetSession, rememberCookies, sessionKey } from './httpSession';
 import * as http from 'http';
 import * as https from 'https';
 import { Credential, basicAuthHeader, forgetStoredPassword, getCredential, isUnauthenticated } from './credentials';
@@ -256,12 +257,14 @@ async function resolveConnection(folder: vscode.WorkspaceFolder, log: Logger): P
 }
 
 function request(conn: Connection, method: 'GET' | 'POST' | 'HEAD', path: string, body?: unknown): Promise<any> {
-    return new Promise((resolve, reject) => {
+    const key = sessionKey(conn.root, conn.authHeader);
+    const attempt = (retried: boolean): Promise<any> => new Promise((resolve, reject) => {
         const url = new URL(/^https?:/.test(path) ? path : conn.base + path);
         const lib = url.protocol === 'http:' ? http : https;
         const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8');
-        const headers: Record<string, string | number> = { Accept: 'application/json' };
-        if (conn.authHeader) headers.Authorization = conn.authHeader;
+        // one login per server: the session cookie when there is one, else the username and password
+        const auth = authHeaders(key, conn.authHeader);
+        const headers: Record<string, string | number> = { Accept: 'application/json', ...auth.headers };
         if (payload) {
             headers['Content-Type'] = 'application/json';
             headers['Content-Length'] = payload.length;
@@ -275,6 +278,13 @@ function request(conn: Connection, method: 'GET' | 'POST' | 'HEAD', path: string
             res.on('end', () => {
                 const status = res.statusCode || 0;
                 const text = Buffer.concat(chunks).toString('utf8');
+                if (status === 401 && auth.usedSession && !retried) {
+                    // the session expired on the server: log in again once with the username and password
+                    forgetSession(key);
+                    attempt(true).then(resolve, reject);
+                    return;
+                }
+                rememberCookies(key, res.headers, auth.usedSession);
                 if (status < 200 || status >= 300) {
                     // IIS/CSP error pages are HTML: keep the status, drop the markup.
                     const detail = text && !/^\s*</.test(text) ? ': ' + text.slice(0, 300) : status === 401 ? ' Unauthorized' : '';
@@ -297,6 +307,7 @@ function request(conn: Connection, method: 'GET' | 'POST' | 'HEAD', path: string
         if (payload) req.write(payload);
         req.end();
     });
+    return attempt(false);
 }
 
 async function runQuery(conn: Connection, query: string, parameters: string[]): Promise<{ Name: string; Type: number }[]> {

@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.7.15",
+  "version": "1.7.16",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -74,7 +74,7 @@
     },
     "keybindings": [
       {
-        "command": "workbench.view.extension.isfsNamespaceSearchContainer",
+        "command": "isfsNamespaceSearch.openSearch",
         "key": "ctrl+alt+s"
       },
       {
@@ -413,6 +413,10 @@
         "title": "Import this JSON",
         "category": "Code Log",
         "icon": "$(check)"
+      },
+      {
+        "command": "isfsNamespaceSearch.openSearch",
+        "title": "InterSystems: Namespace Search (with the selection)"
       }
     ],
     "menus": {

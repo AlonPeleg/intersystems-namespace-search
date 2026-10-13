@@ -248,14 +248,15 @@ async function pickNamespaceFolder(context: vscode.ExtensionContext, docName: st
     return picked?.folder;
 }
 
-/** Prefill: a label^routine reference under the cursor, else the selection, else the last input. */
+/** Prefill: the selection (its first line), else a label^routine reference under the cursor, else the last input. */
 function getInitialValue(context: vscode.ExtensionContext): string {
     const editor = vscode.window.activeTextEditor;
     if (editor) {
         const sel = editor.selection;
         if (!sel.isEmpty) {
-            const text = editor.document.getText(sel).trim();
-            if (text && !text.includes('\n')) return text;
+            // a multi-line selection: its first non-empty line
+            const text = editor.document.getText(sel).split(/\r?\n/).map(l => l.trim()).find(l => l !== '');
+            if (text) return text;
         }
         const refRange = editor.document.getWordRangeAtPosition(
             sel.active,
