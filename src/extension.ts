@@ -615,8 +615,14 @@ export function activate(context: vscode.ExtensionContext) {
         // mask goes back to empty) and it waits for Enter.
         vscode.commands.registerCommand('isfsNamespaceSearch.openSearch', async () => {
             const text = selectedSearchText();
-            if (text !== undefined) provider.prefill(text);
+            if (text !== undefined) provider.prefill(text, editorNamespaceId());
             await vscode.commands.executeCommand('workbench.view.extension.isfsNamespaceSearchContainer');
+        }),
+        // Right-click a Search History entry > Re-run search. VS Code passes the entry's data-vscode-context object
+        // (set in buildHistoryTabElement); the page puts that search back in the fields and runs it again.
+        vscode.commands.registerCommand('isfsNamespaceSearch.rerunHistorySearch', (ctx?: { historyId?: string; namespaceId?: string }) => {
+            if (!ctx || !ctx.historyId) return;
+            provider.rerunHistory(ctx.historyId, ctx.namespaceId);
         })
     );
 
@@ -689,6 +695,20 @@ function getIsfsNamespaces(): NamespaceDescriptor[] {
     return getIsfsWorkspaceFolders().map(f => ({ id: f.uri.toString(), label: f.name }));
 }
 
+/** The search panel's namespace (an open isfs folder) that the active editor's document belongs to, or undefined
+ *  when the editor is not a server document of one of them. */
+function editorNamespaceId(): string | undefined {
+    const uri = vscode.window.activeTextEditor?.document.uri;
+    if (!uri || (uri.scheme !== 'isfs' && uri.scheme !== 'isfs-readonly')) return undefined;
+    const folders = getIsfsWorkspaceFolders();
+    const owner = vscode.workspace.getWorkspaceFolder(uri);
+    if (owner && folders.some(f => f.uri.toString() === owner.uri.toString())) return owner.uri.toString();
+    // Opened outside the folder's tree (another path form): the folder of the same server and namespace.
+    const nsOf = (u: vscode.Uri) => (new URLSearchParams(u.query).get('ns') || '').toLowerCase();
+    const same = folders.find(f => f.uri.authority.toLowerCase() === uri.authority.toLowerCase() && nsOf(f.uri) === nsOf(uri));
+    return same ? same.uri.toString() : undefined;
+}
+
 /** The editor's selection as one line of search text (a multi-line selection: its first non-empty line), or undefined
  *  when nothing is selected. */
 function selectedSearchText(): string | undefined {
@@ -701,12 +721,17 @@ function selectedSearchText(): string | undefined {
 class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _ready = false;
-    private _pendingPrefill: string | undefined;
+    private _pendingPrefill: { query: string; namespaceId?: string } | undefined;
 
-    /** Puts text into the search box (the view may not exist yet: then it is sent once the view is ready). */
-    public prefill(query: string) {
-        if (this._view && this._ready) this._view.webview.postMessage({ type: 'prefill', query });
-        else this._pendingPrefill = query;
+    /** Puts text into the search box, in the namespace it came from when known (the view may not exist yet: then it
+     *  is sent once the view is ready). */
+    public prefill(query: string, namespaceId?: string) {
+        if (this._view && this._ready) this._view.webview.postMessage({ type: 'prefill', query, namespaceId });
+        else this._pendingPrefill = { query, namespaceId };
+    }
+    /** Search History > Re-run search: the page looks the entry up and runs it (it is only visible when the view is). */
+    public rerunHistory(historyId: string, namespaceId?: string) {
+        if (this._view && this._ready) this._view.webview.postMessage({ type: 'rerunHistory', historyId, namespaceId });
     }
     // One search can now run per namespace tab at a time, so cancellation is
     // tracked per namespace instead of a single shared token.
@@ -756,7 +781,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     this.postNamespaceList();
                     this.focusQueryInput();
                     if (this._pendingPrefill !== undefined) {
-                        webviewView.webview.postMessage({ type: 'prefill', query: this._pendingPrefill });
+                        webviewView.webview.postMessage({ type: 'prefill', query: this._pendingPrefill.query, namespaceId: this._pendingPrefill.namespaceId });
                         this._pendingPrefill = undefined;
                     }
                     break;
@@ -2187,7 +2212,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.matchCount = 0;
             state.statusText = 'Preparing search...';
             state.searching = true;
-            state.activeSearchInfo = { query, mask: maskList.join(' | ') };
+            state.activeSearchInfo = { query, mask: maskList.join(' | '), masks: maskList.slice(), useWildcards };
             // A fresh search invalidates whatever file was drilled into, so
             // back out to the full list and land back on Current Search.
             state.resultsDrilldown = null;
@@ -2296,8 +2321,17 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            // Ctrl+Alt+S with text selected in the editor: that text in the box, the mask back to empty, then wait
+            if (msg.type === 'rerunHistory') {
+                rerunHistoryEntry(msg.historyId, msg.namespaceId);
+                return;
+            }
+
+            // Ctrl+Alt+S with text selected in the editor: that text in the box, the mask back to empty, then wait.
+            // The namespace switches to the one the editor's document is in (when it is one of the open ones).
             if (msg.type === 'prefill') {
+                if (msg.namespaceId && msg.namespaceId !== activeNamespace && namespaces.some(n => n.id === msg.namespaceId)) {
+                    switchToNamespace(msg.namespaceId);
+                }
                 queryInput.value = msg.query || '';
                 restoreMaskInputs(DEFAULT_MASKS, true);      // as in a new namespace: default mask (*.cls,*.mac,*.int)
                 saveState();
@@ -2378,9 +2412,14 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const now = new Date();
             const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+            const info = state.activeSearchInfo || {};
             const entry = {
-                query: state.activeSearchInfo.query || state.query,
-                mask: state.activeSearchInfo.mask || (state.masks || []).join(' | '),
+                id: newHistoryId(),
+                query: info.query || state.query,
+                mask: info.mask || (state.masks || []).join(' | '),
+                // Kept as they were typed so Re-run search can put them back exactly (older entries only have "mask").
+                masks: (info.masks && info.masks.length ? info.masks : (state.masks || [])).slice(),
+                useWildcards: typeof info.useWildcards === 'boolean' ? info.useWildcards : state.useWildcards !== false,
                 totalMatches: state.matchCount,
                 timeStr,
                 resultsHtml: state.resultsHtml
@@ -2399,11 +2438,56 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             });
         }
 
+        function newHistoryId() {
+            return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        }
+
+        // Re-run search (right-click a Search History entry): the entry's text, masks and wildcard setting go back into
+        // the fields of its namespace and the search runs again, exactly as if typed and Enter pressed. The entry
+        // itself stays as it was; the new run is added to the history when it finishes, like any search.
+        function rerunHistoryEntry(historyId, nsIdHint) {
+            const nsIds = nsIdHint && nsState[nsIdHint] ? [nsIdHint] : Object.keys(nsState);
+            let nsId = '', entry = null;
+            for (const id of nsIds) {
+                const found = (getNsState(id).history || []).find(h => h.id === historyId);
+                if (found) { nsId = id; entry = found; break; }
+            }
+            if (!entry) return;
+            if (!namespaces.some(n => n.id === nsId)) {
+                statusDiv.textContent = 'That namespace is not open in this workspace any more.';
+                return;
+            }
+            if (getNsState(nsId).searching) {
+                if (nsId !== activeNamespace) switchToNamespace(nsId);
+                statusDiv.textContent = 'A search is already running here. Stop it first, then re-run.';
+                return;
+            }
+            if (nsId !== activeNamespace) switchToNamespace(nsId);
+
+            const masks = entry.masks && entry.masks.length
+                ? entry.masks
+                : String(entry.mask || '').split(' | ').map(m => m.trim()).filter(Boolean);
+            queryInput.value = entry.query || '';
+            if (typeof entry.useWildcards === 'boolean') useWildcardsCheckbox.checked = entry.useWildcards;
+            restoreMaskInputs(masks.length ? masks : DEFAULT_MASKS, !masks.length);
+            saveState();
+            triggerSearchFromKeyboard();
+        }
+
         function buildHistoryTabElement(nsId, entry) {
+            if (!entry.id) entry.id = newHistoryId();   // entries saved before 1.7.17 have none
+
             const details = document.createElement('details');
             details.className = 'history-tab';
 
             const summary = document.createElement('summary');
+            // VS Code's own right-click menu (webview/context in package.json) shows "Re-run search" for this row.
+            summary.setAttribute('data-vscode-context', JSON.stringify({
+                webviewSection: 'searchHistoryEntry',
+                historyId: entry.id,
+                namespaceId: nsId,
+                preventDefaultContextMenuItems: true
+            }));
 
             const leftContainer = document.createElement('div');
             leftContainer.className = 'history-summary-left';

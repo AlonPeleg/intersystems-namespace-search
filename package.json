@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.7.16",
+  "version": "1.7.17",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -417,6 +417,10 @@
       {
         "command": "isfsNamespaceSearch.openSearch",
         "title": "InterSystems: Namespace Search (with the selection)"
+      },
+      {
+        "command": "isfsNamespaceSearch.rerunHistorySearch",
+        "title": "Re-run search"
       }
     ],
     "menus": {
@@ -527,6 +531,10 @@
         },
         {
           "command": "isfsNamespaceSearch.codeLog.importPasted",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.rerunHistorySearch",
           "when": "false"
         }
       ],
@@ -682,6 +690,11 @@
         }
       ],
       "webview/context": [
+        {
+          "command": "isfsNamespaceSearch.rerunHistorySearch",
+          "when": "webviewId == 'isfsNamespaceSearchView' && webviewSection == 'searchHistoryEntry'",
+          "group": "1_search@1"
+        },
         {
           "command": "isfsNamespaceSearch.codeLog.ovNotes",
           "when": "webviewId == 'isfsNamespaceSearch.codeLogDetails' && webviewSection == 'ovrow'",

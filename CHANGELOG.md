@@ -1,5 +1,13 @@
 # Change Log
 
+## [1.7.17]
+
+- **Re-run search** from Search History: right-click an entry > *Re-run search* puts its search text, file masks and
+  *Use wildcards* setting back into the fields of its namespace and runs it again, showing today's results in Current
+  Search. The old entry stays as it was; the new run is added to the history when it finishes.
+- **Ctrl+Alt+S with text selected switches to that document's namespace** before filling in the search text, when the
+  document is in one of the open namespace folders (the panel used to stay on whichever namespace it showed).
+
 ## [1.7.16]
 
 - **One login per server.** Server-side search and Open Document's lists now reuse the session the server returns

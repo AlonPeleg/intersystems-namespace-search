@@ -21,7 +21,7 @@ It works with the server-side (`isfs`) namespace folders you open through the In
 
 Opens the **ISFS Search** panel in the Activity Bar.
 
-With text selected in the editor, `Ctrl+Alt+S` puts that text in **Search Text** (the first line of a multi-line selection), sets the file mask back to the default and waits for Enter. With nothing selected it opens the panel as it was.
+With text selected in the editor, `Ctrl+Alt+S` switches to the namespace of that document (when it is one of the open namespace folders), puts that text in **Search Text** (the first line of a multi-line selection), sets the file mask back to the default and waits for Enter. With nothing selected it opens the panel as it was.
 
 1. **Namespace**: pick which open namespace folder to search. Each namespace keeps its own search text, masks and results, so you can switch between them without losing anything.
 2. **Search Text**: case-insensitive. With **Use wildcards** on, `*` matches any characters and `?` matches one. Turn it off to search for a literal `*` or `?`.
@@ -33,7 +33,7 @@ With text selected in the editor, `Ctrl+Alt+S` puts that text in **Search Text**
 4. Press **Enter** or **Search**. **Stop** cancels a running search.
 
 Click a result to see its matching lines, then click a line to open the document at that line.
-**Search History** keeps your previous searches and their results.
+**Search History** keeps your previous searches and their results. Right-click an entry and choose **Re-run search** to run it again with the same text, masks and wildcard setting.
 
 ### How it searches
 
