@@ -116,6 +116,23 @@ The **←** and **Home** buttons in the title bar do the same as the keys and st
 
 Switching Flat → Tree starts at the namespace root. Switching Tree → Flat keeps your filter text.
 
+## Copy as Code Block
+
+Right-click in the editor > **Copy as Code Block (light colors, for Outlook / Teams)** copies the selection (or the
+current line when nothing is selected) the way it looks in **InterSystems Default Light Modern**, even when the editor
+uses a dark theme such as Monokai, in a light box with a border. Paste it into Outlook, Teams or Word.
+
+- Colors come from the InterSystems Language Server's coloring of the document and the theme's own color for each
+  kind of token, so they match that theme exactly. Other languages copy in the box without colors.
+- In Outlook / Word the box is a bordered, shaded block of paragraphs (Word's own form for it, so Outlook keeps it).
+  In Teams, pasted formatting is simplified; for a real Teams code block type ``` first, pick the language and paste.
+- The code stays left-to-right in a right-to-left (Hebrew) message. Tabs become spaces, and the indentation all lines
+  share is removed, so a method body starts at the left.
+- The plain code goes on the clipboard too: pasting into a plain-text field, or into a Teams code block (type ```
+  first), gets just the code.
+- Settings: `isfsNamespaceSearch.copyCode.theme` (any installed theme by its label), `.box`, `.background`,
+  `.border`, `.fontSize`, `.dedent`. No default key: bind **Copy as Code Block** in Keyboard Shortcuts if you like.
+
 ## Bookmarks
 
 Works in server-side (`isfs`) documents.

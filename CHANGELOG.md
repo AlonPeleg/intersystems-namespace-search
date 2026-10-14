@@ -1,7 +1,21 @@
 # Change Log
 
-## [1.7.17]
+## [1.8.1]
 
+- Fix: **Copy as Code Block** pasted into Outlook showed only the colored text, without the box: Outlook dropped the
+  table the box was made of. The box is now Word's own form of a bordered, shaded block of paragraphs, which Outlook
+  keeps.
+- Fix: in a right-to-left (Hebrew) mail, the last pasted line of code jumped to the right: Word merges the last pasted
+  paragraph into the one the cursor is in. The copy now ends with an empty line that takes that merge, so every code
+  line stays left-to-right.
+
+## [1.8.0]
+
+- **Copy as Code Block** (right-click in the editor): copies the selection, or the current line, in the colors of
+  *InterSystems Default Light Modern* - whatever theme the editor uses - in a light box with a border, ready to paste
+  into Outlook, Teams or Word. The code stays left-to-right in a Hebrew mail, tabs become spaces and the shared
+  indentation is removed. The plain code goes on the clipboard too (for plain-text places, or a Teams code block).
+  Settings under `isfsNamespaceSearch.copyCode.*` (theme, box, colors, font size, dedent).
 - **Re-run search** from Search History: right-click an entry > *Re-run search* puts its search text, file masks and
   *Use wildcards* setting back into the fields of its namespace and runs it again, showing today's results in Current
   Search. The old entry stays as it was; the new run is added to the history when it finishes.

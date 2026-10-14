@@ -6,6 +6,7 @@ import { registerGoTo } from './goto';
 import { registerDocPicker } from './docPicker';
 import { registerBookmarks } from './bookmarks';
 import { registerCodeLog } from './codeLog';
+import { registerCopyCode } from './copyCode';
 import { basicAuthHeader, getCredential, onDidChangeCredentials, registerCredentials } from './credentials';
 
 interface MatchResult {
@@ -654,6 +655,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Code Log: notes about documents and their members - separate module.
     start('Code Log', () => registerCodeLog(context, log));
+
+    // Copy as Code Block: the selection in light-theme colors, in a box, for Outlook / Teams - separate module.
+    start('Copy as Code Block', () => registerCopyCode(context));
 
     // The cached connection info (credentials included) is only valid until
     // the InterSystems extension's own connection state changes - e.g. the
@@ -2475,7 +2479,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
 
         function buildHistoryTabElement(nsId, entry) {
-            if (!entry.id) entry.id = newHistoryId();   // entries saved before 1.7.17 have none
+            if (!entry.id) entry.id = newHistoryId();   // entries saved before 1.8.0 have none
 
             const details = document.createElement('details');
             details.className = 'history-tab';

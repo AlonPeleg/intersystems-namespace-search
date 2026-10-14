@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.7.17",
+  "version": "1.8.1",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -188,6 +188,36 @@
           "type": "boolean",
           "default": true,
           "description": "Open server-side (isfs) documents as regular tabs instead of preview tabs, so a single click keeps them open. Only affects isfs documents; for all files use the built-in workbench.editor.enablePreview setting."
+        },
+        "isfsNamespaceSearch.copyCode.theme": {
+          "type": "string",
+          "default": "InterSystems Default Light Modern",
+          "description": "Copy as Code Block: the color theme whose colors the copied code gets (its label, as in Preferences: Color Theme), whatever theme the editor uses. Any installed theme works; the InterSystems themes color ObjectScript."
+        },
+        "isfsNamespaceSearch.copyCode.box": {
+          "type": "boolean",
+          "default": true,
+          "description": "Copy as Code Block: put the code in a light box with a border (a code block in Outlook / Teams / Word). Off: only the colored code."
+        },
+        "isfsNamespaceSearch.copyCode.background": {
+          "type": "string",
+          "default": "#f6f8fa",
+          "description": "Copy as Code Block: background color of the box."
+        },
+        "isfsNamespaceSearch.copyCode.border": {
+          "type": "string",
+          "default": "#d0d7de",
+          "description": "Copy as Code Block: border color of the box."
+        },
+        "isfsNamespaceSearch.copyCode.fontSize": {
+          "type": "string",
+          "default": "10pt",
+          "description": "Copy as Code Block: font size of the copied code (the font is Consolas)."
+        },
+        "isfsNamespaceSearch.copyCode.dedent": {
+          "type": "boolean",
+          "default": true,
+          "description": "Copy as Code Block: remove the indentation all copied lines share (a method body copies starting at the left)."
         }
       }
     },
@@ -421,6 +451,11 @@
       {
         "command": "isfsNamespaceSearch.rerunHistorySearch",
         "title": "Re-run search"
+      },
+      {
+        "command": "isfsNamespaceSearch.copyAsCodeBlock",
+        "title": "Copy as Code Block (light colors, for Outlook / Teams)",
+        "category": "InterSystems"
       }
     ],
     "menus": {
@@ -687,6 +722,11 @@
           "command": "isfsNamespaceSearch.codeLog.addFromEditor",
           "when": "resourceScheme =~ /^isfs/",
           "group": "z_isfs@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.copyAsCodeBlock",
+          "when": "editorTextFocus",
+          "group": "9_cutcopypaste@9"
         }
       ],
       "webview/context": [
