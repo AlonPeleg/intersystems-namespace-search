@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.8.1",
+  "version": "1.9.1",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -124,6 +124,29 @@
         "command": "isfsNamespaceSearch.openDocument.toggleCheck",
         "key": "ctrl+enter",
         "when": "isfsNamespaceSearch.docPicker.multi && inQuickOpen"
+      },
+      {
+        "command": "isfsNamespaceSearch.openSearchResultLine",
+        "key": "enter",
+        "when": "editorTextFocus && resourceScheme == isfs-search && !suggestWidgetVisible && !findWidgetVisible"
+      }
+    ],
+    "languages": [
+      {
+        "id": "isfs-search",
+        "aliases": [
+          "Namespace Search Results"
+        ],
+        "extensions": [
+          ".isfs-search"
+        ]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "isfs-search",
+        "scopeName": "source.isfs-search",
+        "path": "./syntaxes/isfs-search.tmLanguage.json"
       }
     ],
     "configuration": {
@@ -449,6 +472,18 @@
         "title": "InterSystems: Namespace Search (with the selection)"
       },
       {
+        "command": "isfsNamespaceSearch.openSearchInEditor",
+        "title": "Open in Editor"
+      },
+      {
+        "command": "isfsNamespaceSearch.compareSearchWithNow",
+        "title": "Compare with Now"
+      },
+      {
+        "command": "isfsNamespaceSearch.openSearchResultLine",
+        "title": "Namespace Search: Open the Line Under the Cursor"
+      },
+      {
         "command": "isfsNamespaceSearch.rerunHistorySearch",
         "title": "Re-run search"
       },
@@ -571,6 +606,18 @@
         {
           "command": "isfsNamespaceSearch.rerunHistorySearch",
           "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.openSearchInEditor",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.compareSearchWithNow",
+          "when": "false"
+        },
+        {
+          "command": "isfsNamespaceSearch.openSearchResultLine",
+          "when": "resourceScheme == isfs-search"
         }
       ],
       "view/item/context": [
@@ -730,6 +777,26 @@
         }
       ],
       "webview/context": [
+        {
+          "command": "isfsNamespaceSearch.openSearchInEditor",
+          "when": "webviewId == 'isfsNamespaceSearchView' && webviewSection == 'searchHistoryEntry'",
+          "group": "0_open@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.compareSearchWithNow",
+          "when": "webviewId == 'isfsNamespaceSearchView' && webviewSection == 'searchHistoryEntry'",
+          "group": "0_open@2"
+        },
+        {
+          "command": "isfsNamespaceSearch.openSearchInEditor",
+          "when": "webviewId == 'isfsNamespaceSearchView' && webviewSection == 'currentSearch'",
+          "group": "0_open@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.compareSearchWithNow",
+          "when": "webviewId == 'isfsNamespaceSearchView' && webviewSection == 'currentSearch'",
+          "group": "0_open@2"
+        },
         {
           "command": "isfsNamespaceSearch.rerunHistorySearch",
           "when": "webviewId == 'isfsNamespaceSearchView' && webviewSection == 'searchHistoryEntry'",

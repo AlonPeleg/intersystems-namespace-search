@@ -1,5 +1,26 @@
 # Change Log
 
+## [1.9.1]
+
+- New: an **Open in Editor** row above Current Search's results (with the match and file counts). It shows once a
+  search has finished with results - not while it runs, not after "no matches", not after clearing.
+- New: an **Open in Editor** icon on each Search History entry, between its time and ✕. It appears on the entry under
+  the mouse (or with keyboard focus), so the list looks as before. Clicking it does not open or close the entry.
+- Both do the same as right-click > Open in Editor; Compare with Now stays on the right-click menu.
+
+## [1.9.0]
+
+- New: **Open in Editor** (right-click Current Search or a Search History entry): the search as a read-only document -
+  settings and run time on top, then each document with its matching lines as `line │ label+offset │ code`, the search
+  term highlighted. Ctrl+Click, F12 or Enter on a line opens it.
+- New: **Compare with Now** (same menu): runs the search again in the background and opens the old and new results in
+  VS Code's diff editor (Inline or Side by Side). Line numbers are left out of the comparison, so a match that only
+  moved is not reported; a changed line pairs with its old self. Ctrl+Click / F12 / Enter open the code from both sides.
+- History entries now keep the full date (shown in Open in Editor), and server-side matches keep the method / label
+  the server reports, shown as label+offset. Older entries still open (time of day only, no label).
+- Internal: the search reports through a callback, so a run can be collected without the panel (used by Compare with
+  Now). The panel behaves exactly as before.
+
 ## [1.8.1]
 
 - Fix: **Copy as Code Block** pasted into Outlook showed only the colored text, without the box: Outlook dropped the

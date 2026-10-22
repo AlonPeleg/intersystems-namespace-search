@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { SearchRun, docNameFromPath, shortTitle } from './searchFormat';
+import { openSearchCompare, openSearchDocument, registerSearchEditor } from './searchEditor';
 import { authHeaders, forgetAllSessions, forgetSession, rememberCookies, sessionKey, setSessionLog } from './httpSession';
 import * as http from 'http';
 import * as https from 'https';
@@ -15,6 +17,10 @@ interface MatchResult {
     column: number;
     lineText: string;
     uri: string;
+    // Server-side search only: the method / label the server says the match is in, and the line's offset from its
+    // start (its own log writes utils.cls(checkCustomers+23)). Shown as label+offset in Open in Editor.
+    member?: string;
+    offset?: number;
 }
 
 // Defaults used when the corresponding setting (see package.json) is unset.
@@ -570,14 +576,14 @@ async function runServerSideSearch(
             let exec: RegExpExecArray | null;
             while ((exec = lineRegex.exec(text)) !== null) {
                 foundOnLine = true;
-                matches.push({ fileName, line: lineIdx, column: exec.index, lineText: text.trim(), uri: fileUri.toString() });
+                matches.push({ fileName, line: lineIdx, column: exec.index, lineText: text.trim(), uri: fileUri.toString(), ...(member ? { member, offset: lineNum } : {}) });
                 if (exec.index === lineRegex.lastIndex) lineRegex.lastIndex++;
             }
             if (!foundOnLine) {
                 // Couldn't re-locate the match in the returned text (e.g. it
                 // only held the matched fragment, not the whole line) - still
                 // surface it rather than silently dropping a real match.
-                matches.push({ fileName, line: lineIdx, column: 0, lineText: text.trim(), uri: fileUri.toString() });
+                matches.push({ fileName, line: lineIdx, column: 0, lineText: text.trim(), uri: fileUri.toString(), ...(member ? { member, offset: lineNum } : {}) });
             }
         }
 
@@ -597,6 +603,61 @@ async function runServerSideSearch(
 
     log(`  Normalized to ${groups.length} file group(s), ${groups.reduce((n, g) => n + g.matches.length, 0)} match(es) total.`);
     return groups;
+}
+
+/** A run's time as shown in an opened search: "22 Oct 2026 12:04". */
+function runTimeText(d: Date): string {
+    const day = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    return day + ' ' + time;
+}
+
+/** What the page sent for a search -> a SearchRun (full document names, the namespace folder's name). */
+function toSearchRun(data: any, folder: vscode.WorkspaceFolder | undefined, groups?: any[]): SearchRun {
+    const base = folder ? folder.uri.path : '/';
+    const src: any[] = Array.isArray(groups) ? groups : (Array.isArray(data.groups) ? data.groups : []);
+    return {
+        namespace: folder ? folder.name : (data.namespaceLabel || 'namespace not open in this workspace'),
+        query: String(data.query || ''),
+        masks: Array.isArray(data.masks) ? data.masks.map(String) : [],
+        useWildcards: data.useWildcards !== false,
+        when: data.date ? runTimeText(new Date(data.date)) : String(data.timeStr || ''),
+        totalMatches: groups ? undefined : (typeof data.totalMatches === 'number' ? data.totalMatches : undefined),
+        groups: src.map(g => {
+            let docName: string | undefined;
+            try { docName = docNameFromPath(vscode.Uri.parse(String(g.uri)).path, base); } catch { docName = undefined; }
+            return { fileName: String(g.fileName || ''), docName, uri: String(g.uri || ''), matches: Array.isArray(g.matches) ? g.matches : [] };
+        })
+    };
+}
+
+/** Open in Editor (compare = false) or Compare with Now on Current Search (no historyId) or a history entry. */
+async function openSearchRun(provider: ISFSSearchWebviewProvider, ctx: { historyId?: string; namespaceId?: string }, compare: boolean) {
+    const data = await provider.requestRun(ctx);
+    if (!data || data.error) { vscode.window.showInformationMessage('Namespace Search: ' + ((data && data.error) || 'nothing to open.')); return; }
+    const folder = getIsfsWorkspaceFolders().find(f => f.uri.toString() === data.namespaceId);
+    const then = toSearchRun(data, folder);
+    const pattern = then.query ? new RegExp(buildQueryRegexSource(then.query, then.useWildcards), 'gi') : undefined;
+    if (!compare) { await openSearchDocument(then, pattern); return; }
+
+    if (!folder) { vscode.window.showWarningMessage('Namespace Search: ' + then.namespace + ' - open that namespace folder to run the search again.'); return; }
+    const masks = then.masks.length ? then.masks : ['*.cls,*.mac,*.int'];
+    let cancelled = false;
+    const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Namespace Search: running "' + shortTitle(then.query, 50) + '" again to compare...', cancellable: true },
+        async (_progress, token) => {
+            const r = await provider.runInBackground(folder.uri.toString(), then.query, masks, then.useWildcards, token);
+            cancelled = token.isCancellationRequested;
+            return r;
+        }
+    );
+    if (cancelled) return;
+    if (!result.done.ok) {
+        vscode.window.showWarningMessage('Namespace Search: the new run did not finish (' + (result.done.message || 'stopped') + ').' + (result.groups.length ? ' Comparing with what it found so far.' : ''));
+        if (!result.groups.length) return;
+    }
+    const now = toSearchRun({ ...data, date: new Date().toISOString() }, folder, result.groups);
+    await openSearchCompare(then, now, pattern);
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -624,7 +685,10 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('isfsNamespaceSearch.rerunHistorySearch', (ctx?: { historyId?: string; namespaceId?: string }) => {
             if (!ctx || !ctx.historyId) return;
             provider.rerunHistory(ctx.historyId, ctx.namespaceId);
-        })
+        }),
+        // Right-click Current Search or a Search History entry > Open in Editor / Compare with Now.
+        vscode.commands.registerCommand('isfsNamespaceSearch.openSearchInEditor', (ctx?: { historyId?: string; namespaceId?: string }) => openSearchRun(provider, ctx || {}, false)),
+        vscode.commands.registerCommand('isfsNamespaceSearch.compareSearchWithNow', (ctx?: { historyId?: string; namespaceId?: string }) => openSearchRun(provider, ctx || {}, true))
     );
 
     // Each feature starts on its own: if one ever fails, the others still
@@ -658,6 +722,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Copy as Code Block: the selection in light-theme colors, in a box, for Outlook / Teams - separate module.
     start('Copy as Code Block', () => registerCopyCode(context));
+
+    // Search results in an editor (Open in Editor / Compare with Now): the read-only documents and opening their lines.
+    start('Search in editor', () => registerSearchEditor(context));
 
     // The cached connection info (credentials included) is only valid until
     // the InterSystems extension's own connection state changes - e.g. the
@@ -737,6 +804,40 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
     public rerunHistory(historyId: string, namespaceId?: string) {
         if (this._view && this._ready) this._view.webview.postMessage({ type: 'rerunHistory', historyId, namespaceId });
     }
+
+    // Open in Editor / Compare with now: the page holds the searches (Current Search and Search History live in its
+    // state), so it is asked for one and answers with its settings and matches.
+    private _runRequests = new Map<string, (data: any) => void>();
+    private _runSeq = 0;
+    public requestRun(ctx: { historyId?: string; namespaceId?: string }): Promise<any> {
+        return new Promise(resolve => {
+            if (!this._view || !this._ready) { resolve({ error: 'Open the Namespace Search panel first.' }); return; }
+            const requestId = String(++this._runSeq);
+            const timer = setTimeout(() => { this._runRequests.delete(requestId); resolve({ error: 'The Search panel did not answer.' }); }, 5000);
+            this._runRequests.set(requestId, data => { clearTimeout(timer); resolve(data); });
+            this._view.webview.postMessage({ type: 'exportRun', requestId, historyId: ctx.historyId, namespaceId: ctx.namespaceId });
+        });
+    }
+
+    /** Runs a search without the panel (Compare with now): the same server-side search, or local scan when that is
+     *  not available, with the results collected here instead of shown. */
+    public async runInBackground(namespaceId: string, query: string, masks: string[], useWildcards: boolean, token: vscode.CancellationToken) {
+        const source = new vscode.CancellationTokenSource();
+        const link = token.onCancellationRequested(() => source.cancel());
+        const groups: { fileName: string; uri: string; matches: MatchResult[] }[] = [];
+        let done: { ok: boolean; message: string } | undefined;
+        try {
+            await this.executeThrottledSearch(query, masks, namespaceId, useWildcards, source, msg => {
+                if (msg.type === 'addMatches') groups.push({ fileName: msg.fileName, uri: msg.uri, matches: msg.matches });
+                else if (msg.type === 'searchCompleted') done = { ok: true, message: msg.message };
+                else if (msg.type === 'searchStopped' || msg.type === 'error') done = { ok: false, message: msg.message };
+            });
+        } finally {
+            link.dispose();
+            source.dispose();
+        }
+        return { groups, done: done ?? { ok: !token.isCancellationRequested, message: token.isCancellationRequested ? 'Search cancelled.' : '' } };
+    }
     // One search can now run per namespace tab at a time, so cancellation is
     // tracked per namespace instead of a single shared token.
     private _cancellationTokenSources = new Map<string, vscode.CancellationTokenSource>();
@@ -804,6 +905,16 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     if (data.namespaceId) this.cancelSearchForNamespace(data.namespaceId);
                     break;
                 }
+                case 'openRunInEditor': {
+                    // The Open in Editor row / a history entry's icon: same as the right-click menu item.
+                    openSearchRun(this, { historyId: data.historyId, namespaceId: data.namespaceId }, false);
+                    break;
+                }
+                case 'runData': {
+                    const done = this._runRequests.get(String(data.requestId));
+                    if (done) { this._runRequests.delete(String(data.requestId)); done(data); }
+                    break;
+                }
                 case 'openMatch': {
                     const uri = vscode.Uri.parse(data.uri);
                     const doc = await vscode.workspace.openTextDocument(uri);
@@ -849,16 +960,20 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         masks: string[],
         namespaceId: string,
         useWildcards: boolean,
-        source: vscode.CancellationTokenSource
+        source: vscode.CancellationTokenSource,
+        // Where progress and results go: the sidebar when not given; Compare with now passes its own collector so a
+        // background run never touches the panel.
+        emitTo?: (msg: any) => void
     ) {
-        if (!this._view) return;
+        if (!emitTo && !this._view) return;
+        const emit = emitTo ?? ((msg: any) => { this._view?.webview.postMessage(msg); });
         const token = source.token;
 
         const isfsFolders = getIsfsWorkspaceFolders();
         const folder = isfsFolders.find(f => f.uri.toString() === namespaceId);
 
         if (!folder) {
-            this._view.webview.postMessage({
+            emit({
                 type: 'error',
                 namespaceId,
                 message: 'Selected namespace is no longer available. Please choose another namespace.'
@@ -878,7 +993,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const patternSource = buildQueryRegexSource(query, useWildcards);
         const searchRegex = new RegExp(patternSource, 'gi');
 
-        this._view.webview.postMessage({
+        emit({
             type: 'searchStarted',
             namespaceId,
             query,
@@ -889,12 +1004,12 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const useServerSide = cfg.get('useServerSideSearch') !== false;
 
         if (useServerSide) {
-            const ranServerSide = await this.tryServerSideSearch(folder.uri, masks, query, useWildcards, namespaceId, source);
+            const ranServerSide = await this.tryServerSideSearch(folder.uri, masks, query, useWildcards, namespaceId, source, emit);
             if (ranServerSide) return;
             // tryServerSideSearch already posted a statusUpdate explaining why
             // it's falling back, unless the search was cancelled meanwhile.
             if (token.isCancellationRequested) {
-                this._view.webview.postMessage({ type: 'searchStopped', namespaceId, message: 'Search cancelled.' });
+                emit({ type: 'searchStopped', namespaceId, message: 'Search cancelled.' });
                 this.forgetSearchIfCurrent(namespaceId, source);
                 return;
             }
@@ -904,7 +1019,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const dirCache: DirCache = new Map();
 
         try {
-            this._view.webview.postMessage({
+            emit({
                 type: 'statusUpdate',
                 namespaceId,
                 message: 'Resolving target paths in parallel...'
@@ -914,7 +1029,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const nestedResults = await Promise.all(resolutionPromises);
 
             if (token.isCancellationRequested) {
-                this._view.webview.postMessage({ type: 'searchStopped', namespaceId, message: 'Search cancelled.' });
+                emit({ type: 'searchStopped', namespaceId, message: 'Search cancelled.' });
                 return;
             }
 
@@ -928,7 +1043,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const targetFiles = Array.from(uniqueFileMap.values());
 
             if (targetFiles.length === 0) {
-                this._view.webview.postMessage({
+                emit({
                     type: 'searchCompleted',
                     namespaceId,
                     message: 'Complete. No matching files found.',
@@ -937,7 +1052,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            this._view.webview.postMessage({
+            emit({
                 type: 'statusUpdate',
                 namespaceId,
                 message: `Found ${targetFiles.length} file(s). Scanning...`
@@ -980,8 +1095,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                         }
                     });
 
-                    if (matches.length > 0 && this._view && !token.isCancellationRequested) {
-                        this._view.webview.postMessage({
+                    if (matches.length > 0 && !token.isCancellationRequested) {
+                        emit({
                             type: 'addMatches',
                             namespaceId,
                             fileName: fileUri.path.split('/').pop() || 'Unknown',
@@ -993,8 +1108,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     // Ignore transient file read errors
                 } finally {
                     processed++;
-                    if (this._view && processed % 5 === 0 && !token.isCancellationRequested) {
-                        this._view.webview.postMessage({
+                    if (processed % 5 === 0 && !token.isCancellationRequested) {
+                        emit({
                             type: 'statusUpdate',
                             namespaceId,
                             message: `Scanned ${processed} / ${targetFiles.length} files...`
@@ -1004,9 +1119,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             });
 
             if (token.isCancellationRequested) {
-                this._view.webview.postMessage({ type: 'searchStopped', namespaceId, message: 'Search cancelled.' });
+                emit({ type: 'searchStopped', namespaceId, message: 'Search cancelled.' });
             } else {
-                this._view.webview.postMessage({
+                emit({
                     type: 'searchCompleted',
                     namespaceId,
                     message: `Complete. Found ${totalMatches} match(es) across ${targetFiles.length} files.`,
@@ -1015,7 +1130,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             }
 
         } catch (err: any) {
-            this._view.webview.postMessage({ type: 'error', namespaceId, message: `Search error: ${err.message}` });
+            emit({ type: 'error', namespaceId, message: `Search error: ${err.message}` });
         } finally {
             this.forgetSearchIfCurrent(namespaceId, source);
         }
@@ -1034,9 +1149,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         query: string,
         useWildcards: boolean,
         namespaceId: string,
-        source: vscode.CancellationTokenSource
+        source: vscode.CancellationTokenSource,
+        emit: (msg: any) => void
     ): Promise<boolean> {
-        if (!this._view) return false;
         const token = source.token;
 
         log(`=== New search: query="${query}" wildcards=${useWildcards} masks=[${masks.join(', ')}] ===`);
@@ -1053,7 +1168,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
         if (!connection) {
             log(`No server connection resolved - falling back to local scan. See the FAILED line(s) above for why.`);
-            this._view.webview.postMessage({
+            emit({
                 type: 'statusUpdate',
                 namespaceId,
                 message: 'Server-side search unavailable for this namespace - scanning files locally instead (see View > Output > "ISFS Namespace Search" for why)...'
@@ -1061,7 +1176,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             return false;
         }
 
-        this._view.webview.postMessage({ type: 'statusUpdate', namespaceId, message: 'Searching on the server...' });
+        emit({ type: 'statusUpdate', namespaceId, message: 'Searching on the server...' });
 
         const cfg = vscode.workspace.getConfiguration('isfsNamespaceSearch');
         const allowSelfSigned = cfg.get('allowSelfSignedCert') === true;
@@ -1078,7 +1193,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             log(`runServerSideSearch failed: ${err?.message || err} - falling back to local scan.`);
             // Don't keep reusing credentials the server just rejected.
             if (/HTTP 401/.test(String(err?.message))) connectionCache.delete(folderUri.toString());
-            this._view.webview.postMessage({
+            emit({
                 type: 'statusUpdate',
                 namespaceId,
                 message: `Server-side search failed (${err?.message || err}) - scanning files locally instead (see View > Output > "ISFS Namespace Search")...`
@@ -1091,7 +1206,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         let totalMatches = 0;
         for (const group of groups) {
             totalMatches += group.matches.length;
-            this._view.webview.postMessage({
+            emit({
                 type: 'addMatches',
                 namespaceId,
                 fileName: group.fileName,
@@ -1101,7 +1216,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         }
 
         log(`SUCCESS: server-side search completed - ${totalMatches} match(es) across ${groups.length} file(s).`);
-        this._view.webview.postMessage({
+        emit({
             type: 'searchCompleted',
             namespaceId,
             message: `Complete (server-side search). Found ${totalMatches} match(es) across ${groups.length} file(s).`,
@@ -1725,6 +1840,59 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-errorForeground);
             background: var(--vscode-list-hoverBackground);
         }
+
+        /* Open in Editor: a row above Current Search's results, and an icon on a history entry. */
+        .results-bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 6px 4px 8px;
+            margin-bottom: 4px;
+            border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+        }
+        .results-bar[hidden] { display: none; }
+        .results-bar-count {
+            flex: 1;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .open-editor-btn {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            background: none;
+            border: none;
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            padding: 2px 6px;
+            font-size: 11px;
+            border-radius: 3px;
+            white-space: nowrap;
+        }
+        .open-editor-btn:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+        .open-editor-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+        .tab-open-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: none;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            padding: 2px 3px;
+            border-radius: 2px;
+            line-height: 1;
+            /* Only on the entry under the mouse (or with focus); its space is kept so the time does not move. */
+            visibility: hidden;
+        }
+        details.history-tab:hover .tab-open-btn,
+        details.history-tab > summary:focus-within .tab-open-btn,
+        .tab-open-btn:focus-visible { visibility: visible; }
+        .tab-open-btn:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+        .tab-open-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
     </style>
 </head>
 <body>
@@ -1785,6 +1953,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
     <div id="scrollArea">
         <div id="results" class="tab-panel active">
+            <div id="resultsBar" class="results-bar" hidden>
+                <span id="resultsBarCount" class="results-bar-count"></span>
+                <button type="button" id="openInEditorBtn" class="open-editor-btn" title="Open these results in an editor"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 2.5H3.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9"/><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5 7.5 8.5"/></svg><span>Open in Editor</span></button>
+            </div>
             <div id="resultsList"></div>
             <div id="resultsDetail" class="detail-view" hidden>
                 <div class="detail-header">
@@ -1817,6 +1989,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
         const resultsListDiv = document.getElementById('resultsList');
+        const resultsBar = document.getElementById('resultsBar');
+        const resultsBarCount = document.getElementById('resultsBarCount');
+        const openInEditorBtn = document.getElementById('openInEditorBtn');
         const resultsDetailDiv = document.getElementById('resultsDetail');
         const resultsDetailTitle = document.getElementById('resultsDetailTitle');
         const resultsDetailMatches = document.getElementById('resultsDetailMatches');
@@ -1832,6 +2007,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
         setupNamespacePicker();
         setupTabs();
+
+        // Right-click Current Search (its tab or its results): VS Code's own menu (webview/context in package.json)
+        // shows Open in Editor and Compare with Now for it.
+        [resultsDiv, tabBtnCurrent].forEach(el => el.setAttribute('data-vscode-context', JSON.stringify({
+            webviewSection: 'currentSearch',
+            preventDefaultContextMenuItems: true
+        })));
 
         const DEFAULT_MASKS = ['*.cls,*.mac,*.int'];
 
@@ -2083,7 +2265,22 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             searchBtn.style.display = searching ? 'none' : 'block';
             clearBtn.style.display = searching ? 'none' : 'block';
             stopBtn.style.display = searching ? 'block' : 'none';
+            updateResultsBar();
         }
+
+        // The Open in Editor row above Current Search: only once a search has finished with results (not while it
+        // runs, not after "no matches", not after clearing).
+        function updateResultsBar() {
+            const state = activeNamespace ? getNsState(activeNamespace) : null;
+            const show = !!(state && !state.searching && state.matchCount > 0 && state.resultsHtml);
+            resultsBar.hidden = !show;
+            if (!show) return;
+            const files = groupsFromHtml(state.resultsHtml).length;
+            resultsBarCount.textContent = state.matchCount + ' match' + (state.matchCount === 1 ? '' : 'es') + ' · ' + files + ' file' + (files === 1 ? '' : 's');
+        }
+        openInEditorBtn.addEventListener('click', () => {
+            if (activeNamespace) vscode.postMessage({ type: 'openRunInEditor', namespaceId: activeNamespace });
+        });
 
         // asPlaceholder: when true, the masks passed in (normally the
         // untouched DEFAULT_MASKS) are shown as grey placeholder hints
@@ -2253,6 +2450,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 statusDiv.textContent = 'Ready';
                 if (!keepHistory) renderHistoryFor(nsId);
                 renderActiveTabUI();
+                updateResultsBar();
             }
         }
 
@@ -2327,6 +2525,13 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
             if (msg.type === 'rerunHistory') {
                 rerunHistoryEntry(msg.historyId, msg.namespaceId);
+                return;
+            }
+
+            // Open in Editor / Compare with Now: the extension asks for a search (Current Search, or a history entry)
+            // and gets its settings and matches back.
+            if (msg.type === 'exportRun') {
+                vscode.postMessage(Object.assign({ type: 'runData', requestId: msg.requestId }, exportRun(msg.historyId, msg.namespaceId)));
                 return;
             }
 
@@ -2411,9 +2616,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
         function archiveToHistory(nsId) {
             const state = getNsState(nsId);
+            const now = new Date();
+            state.runAt = now.toISOString();   // when Current Search's results were found (Open in Editor shows it)
             if (!state.matchCount) return;
 
-            const now = new Date();
             const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
             const info = state.activeSearchInfo || {};
@@ -2426,6 +2632,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 useWildcards: typeof info.useWildcards === 'boolean' ? info.useWildcards : state.useWildcards !== false,
                 totalMatches: state.matchCount,
                 timeStr,
+                // The full date and time (timeStr is only the time of day), for Open in Editor / Compare with Now.
+                date: now.toISOString(),
                 resultsHtml: state.resultsHtml
             };
 
@@ -2478,6 +2686,56 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             triggerSearchFromKeyboard();
         }
 
+        // The matches of a saved result list: each file row keeps its matches as JSON (data-matches), so every
+        // history entry - also ones saved by older versions - can be opened in an editor.
+        function groupsFromHtml(html) {
+            const t = document.createElement('template');
+            t.innerHTML = html || '';
+            return Array.from(t.content.querySelectorAll('.file-group')).map(g => {
+                let matches = [];
+                try { matches = JSON.parse(g.getAttribute('data-matches') || '[]'); } catch (e) { matches = []; }
+                return { fileName: g.getAttribute('data-filename') || '', uri: (matches[0] && matches[0].uri) || '', matches };
+            }).filter(g => g.matches.length);
+        }
+        function namespaceLabel(nsId) {
+            const n = namespaces.find(x => x.id === nsId);
+            return n ? n.label : '';
+        }
+        // A search for the extension: a history entry by id, or (no id) the active namespace's Current Search.
+        function exportRun(historyId, nsIdHint) {
+            if (historyId) {
+                const nsIds = nsIdHint && nsState[nsIdHint] ? [nsIdHint] : Object.keys(nsState);
+                for (const id of nsIds) {
+                    const entry = (getNsState(id).history || []).find(h => h.id === historyId);
+                    if (!entry) continue;
+                    const masks = entry.masks && entry.masks.length
+                        ? entry.masks
+                        : String(entry.mask || '').split(' | ').map(m => m.trim()).filter(Boolean);
+                    return {
+                        namespaceId: id, namespaceLabel: namespaceLabel(id),
+                        query: entry.query || '', masks, useWildcards: entry.useWildcards !== false,
+                        totalMatches: entry.totalMatches, timeStr: entry.timeStr || '', date: entry.date || '',
+                        groups: groupsFromHtml(entry.resultsHtml)
+                    };
+                }
+                return { error: 'That search is no longer in the history.' };
+            }
+            const nsId = activeNamespace;
+            if (!nsId) return { error: 'Select a namespace first.' };
+            const st = getNsState(nsId);
+            if (st.searching) return { error: 'The search is still running. Open it when it has finished.' };
+            if (!st.matchCount || !st.resultsHtml) return { error: 'Current Search has no results to open.' };
+            const info = st.activeSearchInfo || {};
+            return {
+                namespaceId: nsId, namespaceLabel: namespaceLabel(nsId),
+                query: info.query || st.query || '',
+                masks: info.masks && info.masks.length ? info.masks : (st.masks || []),
+                useWildcards: typeof info.useWildcards === 'boolean' ? info.useWildcards : st.useWildcards !== false,
+                totalMatches: st.matchCount, timeStr: '', date: st.runAt || '',
+                groups: groupsFromHtml(st.resultsHtml)
+            };
+        }
+
         function buildHistoryTabElement(nsId, entry) {
             if (!entry.id) entry.id = newHistoryId();   // entries saved before 1.8.0 have none
 
@@ -2485,7 +2743,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             details.className = 'history-tab';
 
             const summary = document.createElement('summary');
-            // VS Code's own right-click menu (webview/context in package.json) shows "Re-run search" for this row.
+            // VS Code's own right-click menu (webview/context in package.json) shows Open in Editor, Compare with Now
+            // and Re-run search for this row.
             summary.setAttribute('data-vscode-context', JSON.stringify({
                 webviewSection: 'searchHistoryEntry',
                 historyId: entry.id,
@@ -2524,12 +2783,28 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 saveState();
             });
 
+            // Open in Editor, between the time and the x (shown on hover, see .tab-open-btn).
+            const openBtn = document.createElement('button');
+            openBtn.type = 'button';
+            openBtn.className = 'tab-open-btn';
+            openBtn.title = 'Open in Editor';
+            openBtn.setAttribute('aria-label', 'Open this search in an editor');
+            openBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 2.5H3.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9"/><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5 7.5 8.5"/></svg>';
+            openBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();   // a click in the summary would otherwise open / close the entry
+                vscode.postMessage({ type: 'openRunInEditor', historyId: entry.id, namespaceId: nsId });
+            });
+
             summary.appendChild(leftContainer);
             summary.appendChild(timeSpan);
+            summary.appendChild(openBtn);
             summary.appendChild(deleteBtn);
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'history-content';
+            // Right-clicking the entry's results (not only its title row) gives the same menu.
+            contentDiv.setAttribute('data-vscode-context', summary.getAttribute('data-vscode-context'));
 
             // Each history entry gets its own independent list/detail pair
             // (unlike Current Search, this doesn't need to be persisted -

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Namespace Search Results",
+  "scopeName": "source.isfs-search",
+  "patterns": [
+    { "include": "#header" },
+    { "include": "#numberedMatch" },
+    { "include": "#compareMatch" },
+    { "include": "#document" }
+  ],
+  "repository": {
+    "header": {
+      "match": "^#.*$",
+      "name": "comment.line.number-sign.isfs-search"
+    },
+    "document": {
+      "match": "^(\\S.*?)(\\s{2}\\(\\d+\\))?$",
+      "captures": {
+        "1": { "name": "entity.name.type.class.isfs-search" },
+        "2": { "name": "comment.line.isfs-search" }
+      }
+    },
+    "numberedMatch": {
+      "comment": "Open in Editor:   142 │ getSchema+4 │ code",
+      "match": "^\\s+(\\d+)\\s(│)(?:\\s(\\S+?)\\s*(│))?",
+      "captures": {
+        "1": { "name": "constant.numeric.line-number.isfs-search" },
+        "2": { "name": "punctuation.separator.isfs-search" },
+        "3": { "name": "entity.name.function.isfs-search" },
+        "4": { "name": "punctuation.separator.isfs-search" }
+      }
+    },
+    "compareMatch": {
+      "comment": "Compare with Now:   getSchema │ code",
+      "match": "^\\s{2}(\\S+?)\\s*(│)\\s",
+      "captures": {
+        "1": { "name": "entity.name.function.isfs-search" },
+        "2": { "name": "punctuation.separator.isfs-search" }
+      }
+    }
+  }
+}

@@ -35,6 +35,27 @@ With text selected in the editor, `Ctrl+Alt+S` switches to the namespace of that
 Click a result to see its matching lines, then click a line to open the document at that line.
 **Search History** keeps your previous searches and their results. Right-click an entry and choose **Re-run search** to run it again with the same text, masks and wildcard setting.
 
+### Open a search in an editor
+
+Right-click **Current Search** (its tab or its results) or a **Search History** entry. Open in Editor is also one click
+away: the **Open in Editor** row above Current Search's results (once a search has finished with results), and the
+icon between a history entry's time and ✕ (on the entry under the mouse).
+
+- **Open in Editor** shows the search as a read-only document: the namespace, search text, masks and when it ran, then
+  every document with its matching lines as `line │ label+offset │ code` (the label column appears when the server
+  says which method / label a match is in). The search term is highlighted, documents fold, and Find, copy and
+  Save As work as in any editor.
+- **Compare with Now** runs the same search again in the background (the panel and history are not touched) and
+  opens the old results and the new ones in VS Code's diff editor. Use the editor's **Inline** / **Side by Side**
+  switch for one column of changes or both side by side, and **Collapse Unchanged Regions** to see only what changed.
+  - A changed line (`set abc=123` → `set abc=245`) shows as one changed line with the difference highlighted.
+  - A match that only moved because lines were added above it is not reported: the compare leaves out line numbers.
+  - A line that no longer matches the search is shown as removed; a new matching line or document as added.
+- In both, **Ctrl+Click**, **F12** or **Enter** on a line opens that document at that line (on a document name: at
+  its top), on either side of the diff.
+
+Entries saved by earlier versions open too; they show only the time of day, newer ones the full date.
+
 ### How it searches
 
 By default the search runs **on the IRIS server** through the Atelier API. That's the same server-side search
