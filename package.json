@@ -2,7 +2,7 @@
   "name": "intersystems-namespace-search",
   "displayName": "InterSystems Namespace Search",
   "description": "Server-side namespace search (Studio Find in Files speed) with a background concurrent local scan as fallback.",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "publisher": "alonpe",
   "icon": "images/icon.png",
   "engines": {
@@ -167,7 +167,7 @@
           "type": "number",
           "default": 5000,
           "minimum": 1,
-          "description": "Maximum matches requested per server-side search. The Atelier API's own default is only 200, which can silently truncate a broad search - this raises that ceiling. Only applies when isfsNamespaceSearch.useServerSideSearch is on."
+          "description": "Most matches one search returns (server-side search and the local scan). When a search reaches it, the panel says so and offers to search once more with a higher limit; this setting stays as it is."
         },
         "isfsNamespaceSearch.allowSelfSignedCert": {
           "type": "boolean",
@@ -296,6 +296,12 @@
         "title": "Clear Bookmarks in Namespace",
         "category": "InterSystems",
         "icon": "$(trash)"
+      },
+      {
+        "command": "isfsNamespaceSearch.bookmarks.editNote",
+        "title": "Edit Bookmark Note...",
+        "category": "InterSystems",
+        "icon": "$(edit)"
       },
       {
         "command": "isfsNamespaceSearch.bookmarks.delete",
@@ -618,9 +624,28 @@
         {
           "command": "isfsNamespaceSearch.openSearchResultLine",
           "when": "resourceScheme == isfs-search"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.editNote",
+          "when": "resourceScheme =~ /^isfs/"
         }
       ],
       "view/item/context": [
+        {
+          "command": "isfsNamespaceSearch.bookmarks.editNote",
+          "when": "view == isfsNamespaceSearch.bookmarksView && viewItem == bookmarkItem",
+          "group": "inline@0"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.editNote",
+          "when": "view == isfsNamespaceSearch.bookmarksView && viewItem == bookmarkItem",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "isfsNamespaceSearch.bookmarks.delete",
+          "when": "view == isfsNamespaceSearch.bookmarksView && viewItem == bookmarkItem",
+          "group": "2_delete@1"
+        },
         {
           "command": "isfsNamespaceSearch.bookmarks.delete",
           "when": "view == isfsNamespaceSearch.bookmarksView && viewItem == bookmarkItem",

@@ -70,6 +70,18 @@ It automatically falls back to a **local scan**, which lists folders and reads e
 
 To see which path a search took and why, open **View → Output → ISFS Namespace Search**.
 
+### When a search is incomplete
+
+A yellow box above the results says so, instead of the search just reporting "Complete":
+
+- **The match limit was reached** (`isfsNamespaceSearch.serverSearchMaxResults`, 5,000 by default, for both the server
+  search and the local scan): there are more matches than shown. **Search again (up to 20,000)** runs the same search
+  once more with four times the limit; the setting itself stays as it is, so the next search uses it again. Or narrow
+  the File Mask.
+- **Files that could not be read** (local scan): each file gets one quiet second try, and the ones that still fail are
+  listed with the reason (timeout, HTTP 500, ...). **Retry N failed** reads only those files again; what they match is
+  added to the current results and to that search's history entry, and the box says how many were read.
+
 The server is logged in to once: the session it returns is reused for the next searches and Open Document listings (like the InterSystems extension does), and a new login happens only when that session has expired on the server.
 
 ## Go To: `Ctrl+Alt+G`
@@ -167,6 +179,12 @@ Works in server-side (`isfs`) documents.
 These keys only apply in `isfs` documents. Elsewhere `F2` is still Rename Symbol.
 
 Bookmarked lines get a yellow marker in the gutter and on the scrollbar.
+
+**Notes.** Right-click a bookmark in the sidebar (or click its pencil icon) → **Edit Bookmark Note...** to give it a
+note. The note shows next to the bookmark (`SetTavla+3 · check the VAT rounding`), in full in its tooltip, and when you
+hover the bookmarked line in the editor. From the editor, **InterSystems: Edit Bookmark Note...** in the Command
+Palette works on the cursor's line (and bookmarks it if it isn't yet). An empty note removes it. Notes move with their
+bookmark as you edit, and go when the bookmark goes.
 The **ISFS Bookmarks** sidebar lists them by namespace → document → bookmark. Each bookmark shows its label and offset
 (e.g. `SetTavla+3`, or the class method it's in) and its line number. Click one to jump there.
 The buttons on each row delete one bookmark, clear a document, or clear a whole namespace.

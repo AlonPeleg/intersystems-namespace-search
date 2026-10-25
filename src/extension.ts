@@ -898,7 +898,15 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     const source = new vscode.CancellationTokenSource();
                     this._cancellationTokenSources.set(namespaceId, source);
                     const useWildcards = data.useWildcards !== false;
-                    this.executeThrottledSearch(data.query, data.masks, namespaceId, useWildcards, source);
+                    // "Search again (up to 20,000)": a higher limit for this one run only
+                    const maxOverride = typeof data.maxResults === 'number' && data.maxResults > 0 ? Math.floor(data.maxResults) : undefined;
+                    this.executeThrottledSearch(data.query, data.masks, namespaceId, useWildcards, source, undefined, maxOverride);
+                    break;
+                }
+                case 'retryFailed': {
+                    // "Retry N failed": read just those files again; their matches join the current results
+                    if (!data.namespaceId || !Array.isArray(data.uris)) break;
+                    void this.retryFailedFiles(String(data.namespaceId), data.uris.map(String), String(data.query || ''), data.useWildcards !== false);
                     break;
                 }
                 case 'stopSearch': {
@@ -963,7 +971,9 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         source: vscode.CancellationTokenSource,
         // Where progress and results go: the sidebar when not given; Compare with now passes its own collector so a
         // background run never touches the panel.
-        emitTo?: (msg: any) => void
+        emitTo?: (msg: any) => void,
+        // a higher result limit for this run only (otherwise isfsNamespaceSearch.serverSearchMaxResults)
+        maxOverride?: number
     ) {
         if (!emitTo && !this._view) return;
         const emit = emitTo ?? ((msg: any) => { this._view?.webview.postMessage(msg); });
@@ -1004,7 +1014,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const useServerSide = cfg.get('useServerSideSearch') !== false;
 
         if (useServerSide) {
-            const ranServerSide = await this.tryServerSideSearch(folder.uri, masks, query, useWildcards, namespaceId, source, emit);
+            const ranServerSide = await this.tryServerSideSearch(folder.uri, masks, query, useWildcards, namespaceId, source, emit, maxOverride);
             if (ranServerSide) return;
             // tryServerSideSearch already posted a statusUpdate explaining why
             // it's falling back, unless the search was cancelled meanwhile.
@@ -1060,40 +1070,30 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
             let processed = 0;
             let totalMatches = 0;
+            const maxResults = searchMaxResults(maxOverride);
+            let limitReached = false;
+            const failed: FailedFile[] = [];
 
             await runWithConcurrency(targetFiles, tuning.fileConcurrency, token, async (fileUri) => {
-                if (token.isCancellationRequested) return;
+                if (token.isCancellationRequested || limitReached) return;
 
                 try {
                     if (tuning.pauseBetweenReadsMs > 0) await sleep(tuning.pauseBetweenReadsMs);
 
-                    const fileBytes = await vscode.workspace.fs.readFile(fileUri);
-                    const content = new TextDecoder('utf-8').decode(fileBytes);
-                    const lines = content.split(/\r?\n/);
-                    const matches: MatchResult[] = [];
-
-                    // One regex per file instead of one per line - same matching
-                    // behavior (reset lastIndex before each line), far fewer
-                    // RegExp allocations on files with many lines.
-                    const fileRegex = new RegExp(searchRegex.source, searchRegex.flags);
-                    lines.forEach((lineText, lineIdx) => {
-                        fileRegex.lastIndex = 0;
-                        let match: RegExpExecArray | null;
-                        while ((match = fileRegex.exec(lineText)) !== null) {
-                            const fileName = fileUri.path.split('/').pop() || 'Unknown';
-                            matches.push({
-                                fileName,
-                                line: lineIdx,
-                                column: match.index,
-                                lineText: lineText.trim(),
-                                uri: fileUri.toString()
-                            });
-                            totalMatches++;
-                            // Guard against zero-length matches (e.g. a bare "*"
-                            // wildcard) spinning forever at the same index.
-                            if (match.index === fileRegex.lastIndex) fileRegex.lastIndex++;
-                        }
-                    });
+                    let matches: MatchResult[];
+                    try {
+                        matches = await scanFile(fileUri, searchRegex);
+                    } catch {
+                        // one quiet second try (busy server, dropped connection) before it counts as failed
+                        await sleep(400);
+                        matches = await scanFile(fileUri, searchRegex);
+                    }
+                    if (limitReached) return;
+                    if (totalMatches + matches.length >= maxResults) {
+                        matches = matches.slice(0, Math.max(0, maxResults - totalMatches));
+                        limitReached = true;
+                    }
+                    totalMatches += matches.length;
 
                     if (matches.length > 0 && !token.isCancellationRequested) {
                         emit({
@@ -1104,8 +1104,10 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                             matches
                         });
                     }
-                } catch {
-                    // Ignore transient file read errors
+                } catch (e: any) {
+                    // Counted and shown (with a Retry button) instead of silently missing from the results.
+                    failed.push({ uri: fileUri.toString(), fileName: fileUri.path.split('/').pop() || fileUri.path, reason: shortReason(e) });
+                    log(`  Could not read ${fileUri.toString()}: ${e?.message || e}`);
                 } finally {
                     processed++;
                     if (processed % 5 === 0 && !token.isCancellationRequested) {
@@ -1124,8 +1126,14 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                 emit({
                     type: 'searchCompleted',
                     namespaceId,
-                    message: `Complete. Found ${totalMatches} match(es) across ${targetFiles.length} files.`,
-                    totalMatches
+                    message: limitReached
+                        ? `Stopped at ${totalMatches} matches (the limit).`
+                        : `Complete. Found ${totalMatches} match(es) across ${targetFiles.length} files.`,
+                    totalMatches,
+                    limit: limitReached ? { max: maxResults, next: nextLimit(maxResults) } : undefined,
+                    failed: failed.length ? failed : undefined,
+                    scanned: processed - failed.length,
+                    totalFiles: targetFiles.length
                 });
             }
 
@@ -1150,7 +1158,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         useWildcards: boolean,
         namespaceId: string,
         source: vscode.CancellationTokenSource,
-        emit: (msg: any) => void
+        emit: (msg: any) => void,
+        maxOverride?: number
     ): Promise<boolean> {
         const token = source.token;
 
@@ -1180,10 +1189,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
         const cfg = vscode.workspace.getConfiguration('isfsNamespaceSearch');
         const allowSelfSigned = cfg.get('allowSelfSignedCert') === true;
-        const configuredMax = cfg.get('serverSearchMaxResults');
-        const maxResults = typeof configuredMax === 'number' && Number.isFinite(configuredMax) && configuredMax > 0
-            ? Math.floor(configuredMax)
-            : 5000;
+        const maxResults = searchMaxResults(maxOverride);
 
         let groups: ServerSearchGroup[];
         try {
@@ -1215,15 +1221,40 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             });
         }
 
-        log(`SUCCESS: server-side search completed - ${totalMatches} match(es) across ${groups.length} file(s).`);
+        // The server stops at `max`: having that many back means there are probably more.
+        const limitReached = totalMatches >= maxResults || groups.length >= maxResults;
+        log(`SUCCESS: server-side search completed - ${totalMatches} match(es) across ${groups.length} file(s).${limitReached ? ` The limit (${maxResults}) was reached.` : ''}`);
         emit({
             type: 'searchCompleted',
             namespaceId,
             message: `Complete (server-side search). Found ${totalMatches} match(es) across ${groups.length} file(s).`,
-            totalMatches
+            totalMatches,
+            limit: limitReached ? { max: maxResults, next: nextLimit(maxResults) } : undefined
         });
         this.forgetSearchIfCurrent(namespaceId, source);
         return true;
+    }
+
+    /** "Retry N failed": reads only those files again (same search text). Their matches are added to Current Search,
+     *  and the page is told which ones still failed. */
+    private async retryFailedFiles(namespaceId: string, uris: string[], query: string, useWildcards: boolean) {
+        const emit = (msg: any) => { this._view?.webview.postMessage(msg); };
+        const searchRegex = new RegExp(buildQueryRegexSource(query, useWildcards), 'gi');
+        const failed: FailedFile[] = [];
+        let found = 0;
+        emit({ type: 'statusUpdate', namespaceId, message: `Retrying ${uris.length} file(s)...` });
+        for (const u of uris) {
+            const fileUri = vscode.Uri.parse(u);
+            try {
+                const matches = await scanFile(fileUri, searchRegex);
+                found += matches.length;
+                if (matches.length) emit({ type: 'addMatches', namespaceId, fileName: fileUri.path.split('/').pop() || 'Unknown', uri: u, matches });
+            } catch (e: any) {
+                failed.push({ uri: u, fileName: fileUri.path.split('/').pop() || fileUri.path, reason: shortReason(e) });
+                log(`  Retry: could not read ${u}: ${e?.message || e}`);
+            }
+        }
+        emit({ type: 'retryCompleted', namespaceId, retried: uris.length, failed, found });
     }
 
     // Only clears the map entry if it still points at *this* run's token
@@ -1851,6 +1882,36 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
         }
         .results-bar[hidden] { display: none; }
+        /* The yellow box above the results: the search stopped at its limit, or some files could not be read. */
+        .notice {
+            margin: 6px 0 6px 0;
+            padding: 6px 8px;
+            font-size: 11px;
+            line-height: 1.45;
+            color: var(--vscode-foreground);
+            background: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.15));
+            border: 1px solid var(--vscode-inputValidation-warningBorder, #cca700);
+            border-radius: 2px;
+        }
+        .notice[hidden] { display: none; }
+        .notice .notice-line { display: flex; gap: 6px; align-items: flex-start; }
+        .notice .notice-icon { flex: 0 0 auto; color: var(--vscode-editorWarning-foreground, #cca700); }
+        .notice .notice-files { margin: 4px 0 0 18px; font-family: var(--vscode-editor-font-family, monospace); opacity: .9; }
+        .notice .notice-files div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .notice .notice-hint { margin: 4px 0 0 18px; color: var(--vscode-descriptionForeground); }
+        .notice .notice-actions { margin: 6px 0 0 18px; display: flex; gap: 6px; flex-wrap: wrap; }
+        .notice button {
+            font-size: 11px; padding: 2px 8px; cursor: pointer; border-radius: 2px;
+            color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
+            border: 1px solid var(--vscode-button-border, transparent);
+        }
+        .notice button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+        .notice button:disabled { opacity: .6; cursor: default; }
+        /* the limit warning alone: one small line, the button at its end */
+        .notice.compact { padding: 2px 4px 2px 6px; margin: 4px 0; }
+        .notice .notice-row { display: flex; align-items: center; gap: 6px; }
+        .notice .notice-row .notice-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .notice .notice-row button { flex: 0 0 auto; padding: 1px 6px; }
         .results-bar-count {
             flex: 1;
             font-size: 11px;
@@ -1953,6 +2014,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
 
     <div id="scrollArea">
         <div id="results" class="tab-panel active">
+            <div id="notice" class="notice" hidden></div>
             <div id="resultsBar" class="results-bar" hidden>
                 <span id="resultsBarCount" class="results-bar-count"></span>
                 <button type="button" id="openInEditorBtn" class="open-editor-btn" title="Open these results in an editor"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 2.5H3.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9"/><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5 7.5 8.5"/></svg><span>Open in Editor</span></button>
@@ -1990,6 +2052,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         const resultsDiv = document.getElementById('results');
         const resultsListDiv = document.getElementById('resultsList');
         const resultsBar = document.getElementById('resultsBar');
+        const noticeDiv = document.getElementById('notice');
         const resultsBarCount = document.getElementById('resultsBarCount');
         const openInEditorBtn = document.getElementById('openInEditorBtn');
         const resultsDetailDiv = document.getElementById('resultsDetail');
@@ -2271,6 +2334,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
         // The Open in Editor row above Current Search: only once a search has finished with results (not while it
         // runs, not after "no matches", not after clearing).
         function updateResultsBar() {
+            renderNotice();
             const state = activeNamespace ? getNsState(activeNamespace) : null;
             const show = !!(state && !state.searching && state.matchCount > 0 && state.resultsHtml);
             resultsBar.hidden = !show;
@@ -2382,7 +2446,8 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             searchBtn.click();
         }
 
-        searchBtn.addEventListener('click', () => {
+        // maxOverride: "Search again (up to 20,000)" - a higher limit for this one run (the setting stays as it is)
+        function runSearch(maxOverride) {
             const query = queryInput.value.trim();
             // An empty mask box is normally just the untouched DEFAULT_MASKS
             // placeholder (see restoreMaskInputs) - searching without typing
@@ -2414,6 +2479,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.statusText = 'Preparing search...';
             state.searching = true;
             state.activeSearchInfo = { query, mask: maskList.join(' | '), masks: maskList.slice(), useWildcards };
+            state.notice = null;
             // A fresh search invalidates whatever file was drilled into, so
             // back out to the full list and land back on Current Search.
             state.resultsDrilldown = null;
@@ -2427,8 +2493,11 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             renderNamespacePicker();
             saveState();
 
-            vscode.postMessage({ type: 'startSearch', query, masks: maskList, namespaceId: nsId, useWildcards });
-        });
+            const msg = { type: 'startSearch', query, masks: maskList, namespaceId: nsId, useWildcards };
+            if (maxOverride) msg.maxResults = maxOverride;
+            vscode.postMessage(msg);
+        }
+        searchBtn.addEventListener('click', () => runSearch());
 
         // Wipes this namespace's current results and its whole search
         // history (but leaves the search text and file mask alone) - shared
@@ -2441,6 +2510,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             if (!keepHistory) state.history = [];
             state.statusText = 'Ready';
             state.activeSearchInfo = { query: '', mask: '' };
+            state.notice = null;
             state.resultsDrilldown = null;
             state.activeTab = 'current';
 
@@ -2592,10 +2662,45 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     // This search's own results go to history the moment it
                     // finishes - not only if/when a later search overwrites
                     // them - so every search you actually run ends up there.
-                    archiveToHistory(nsId);
+                    {
+                        const historyId = archiveToHistory(nsId);
+                        const info = state.activeSearchInfo || {};
+                        state.notice = (msg.limit || (msg.failed && msg.failed.length)) ? {
+                            limit: msg.limit || null,
+                            failed: msg.failed || [],
+                            scanned: msg.scanned, totalFiles: msg.totalFiles,
+                            query: info.query || state.query, masks: (info.masks || state.masks || []).slice(),
+                            useWildcards: typeof info.useWildcards === 'boolean' ? info.useWildcards : state.useWildcards !== false,
+                            historyId: historyId || null,
+                            retrying: false, retryNote: ''
+                        } : null;
+                    }
+                    if (isActive) updateResultsBar();
                     renderNamespacePicker();
                     saveState();
                     break;
+                case 'retryCompleted': {
+                    const n = state.notice;
+                    if (!n) break;
+                    const still = msg.failed || [];
+                    const read = msg.retried - still.length;
+                    n.failed = still;
+                    n.retrying = false;
+                    n.scanned = (n.scanned || 0) + read;
+                    n.retryNote = 'Retried ' + msg.retried + ': ' + read + ' read, ' + still.length + ' still failed' +
+                        (msg.found ? ' · ' + msg.found + ' more match' + (msg.found === 1 ? '' : 'es') + ' added' : '') + '.';
+                    state.statusText = still.length ? 'Complete, ' + still.length + ' file' + (still.length === 1 ? '' : 's') + ' still could not be read.' : 'Complete. Every file was read.';
+                    // the history entry of this search gets the matches the retry found
+                    if (msg.found) {
+                        const entry = n.historyId ? (state.history || []).find(h => h.id === n.historyId) : null;
+                        if (entry) { entry.resultsHtml = state.resultsHtml; entry.totalMatches = state.matchCount; }
+                        else n.historyId = archiveToHistory(nsId) || null;
+                        if (isActive) renderHistoryFor(nsId);
+                    }
+                    if (isActive) { statusDiv.textContent = state.statusText; updateResultsBar(); }
+                    saveState();
+                    break;
+                }
                 case 'searchStopped':
                 case 'error':
                     state.searching = false;
@@ -2607,6 +2712,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
                     // Whatever matches had already streamed in before the
                     // search was stopped/errored still count as a real,
                     // completed result set for history purposes.
+                    state.notice = null;
                     archiveToHistory(nsId);
                     renderNamespacePicker();
                     saveState();
@@ -2618,7 +2724,7 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             const state = getNsState(nsId);
             const now = new Date();
             state.runAt = now.toISOString();   // when Current Search's results were found (Open in Editor shows it)
-            if (!state.matchCount) return;
+            if (!state.matchCount) return undefined;
 
             const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -2640,6 +2746,67 @@ class ISFSSearchWebviewProvider implements vscode.WebviewViewProvider {
             state.history.unshift(entry);
 
             if (nsId === activeNamespace) renderHistoryFor(nsId);
+            return entry.id;
+        }
+
+        // ---- the notice above the results: limit reached / files that could not be read ----
+        function renderNotice() {
+            const state = activeNamespace ? getNsState(activeNamespace) : null;
+            const n = state && !state.searching ? state.notice : null;
+            noticeDiv.textContent = '';
+            if (!n || (!n.limit && !(n.failed && n.failed.length) && !n.retryNote)) { noticeDiv.hidden = true; return; }
+            noticeDiv.hidden = false;
+            const fmt = x => Number(x).toLocaleString('en-US');
+            const line = (text) => {
+                const d = document.createElement('div'); d.className = 'notice-line';
+                const ic = document.createElement('span'); ic.className = 'notice-icon'; ic.textContent = '\u26A0';
+                const t = document.createElement('span'); t.textContent = text;
+                d.appendChild(ic); d.appendChild(t); noticeDiv.appendChild(d);
+            };
+            const actions = () => { const a = document.createElement('div'); a.className = 'notice-actions'; noticeDiv.appendChild(a); return a; };
+            const hasFailed = !!(n.failed && n.failed.length) || !!n.retryNote;
+            noticeDiv.classList.toggle('compact', !hasFailed);
+            if (n.limit) {
+                // one small line: the warning, and the button at its end
+                const row = document.createElement('div'); row.className = 'notice-row';
+                const ic = document.createElement('span'); ic.className = 'notice-icon'; ic.textContent = '\u26A0';
+                const t = document.createElement('span'); t.className = 'notice-text';
+                t.textContent = 'More than ' + fmt(n.limit.max) + ' matches';
+                t.title = 'The search stopped at its limit of ' + fmt(n.limit.max) + ' matches (isfsNamespaceSearch.serverSearchMaxResults). Search again with a higher limit, or narrow the File Mask.';
+                row.appendChild(ic); row.appendChild(t);
+                noticeDiv.appendChild(row);
+                const b = document.createElement('button');
+                b.textContent = 'Search up to ' + fmt(n.limit.next);
+                b.title = 'Runs this search once more with a higher limit. Your setting stays at ' + fmt(n.limit.max) + '.';
+                b.addEventListener('click', () => {
+                    queryInput.value = n.query || '';
+                    useWildcardsCheckbox.checked = n.useWildcards !== false;
+                    restoreMaskInputs(n.masks && n.masks.length ? n.masks : DEFAULT_MASKS, !(n.masks && n.masks.length));
+                    runSearch(n.limit.next);
+                });
+                row.appendChild(b);
+            }
+            if (n.failed && n.failed.length) {
+                const total = (n.scanned || 0) + n.failed.length;
+                line(fmt(n.scanned || 0) + ' of ' + fmt(total) + ' files scanned. ' + n.failed.length + " couldn't be read.");
+                const files = document.createElement('div'); files.className = 'notice-files';
+                n.failed.slice(0, 8).forEach(f => { const d = document.createElement('div'); d.textContent = f.fileName + ' \u00b7 ' + f.reason; d.title = f.uri; files.appendChild(d); });
+                if (n.failed.length > 8) { const d = document.createElement('div'); d.textContent = '… and ' + (n.failed.length - 8) + ' more (see View > Output > ISFS Namespace Search)'; files.appendChild(d); }
+                noticeDiv.appendChild(files);
+                const a = actions();
+                const b = document.createElement('button');
+                b.textContent = n.retrying ? 'Retrying…' : 'Retry ' + n.failed.length + ' failed';
+                b.disabled = !!n.retrying;
+                b.title = 'Reads only these files again; what they match is added to these results.';
+                b.addEventListener('click', () => {
+                    if (n.retrying) return;
+                    n.retrying = true; n.retryNote = '';
+                    renderNotice(); saveState();
+                    vscode.postMessage({ type: 'retryFailed', namespaceId: activeNamespace, uris: n.failed.map(f => f.uri), query: n.query, useWildcards: n.useWildcards });
+                });
+                a.appendChild(b);
+            }
+            if (n.retryNote) { const h = document.createElement('div'); h.className = 'notice-hint'; h.textContent = n.retryNote; noticeDiv.appendChild(h); }
         }
 
         function renderHistoryFor(nsId) {
@@ -3197,6 +3364,53 @@ async function collectMatchingFiles(
 
     await walk(startUri);
     return fileUris;
+}
+
+interface FailedFile { uri: string; fileName: string; reason: string }
+
+/** The result limit of a search: this run's own one (Search again with a higher limit), else the setting. */
+function searchMaxResults(override?: number): number {
+    if (override && override > 0) return override;
+    const configured = vscode.workspace.getConfiguration('isfsNamespaceSearch').get('serverSearchMaxResults');
+    return typeof configured === 'number' && Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 5000;
+}
+
+/** The limit offered by "Search again": four times this one (5,000 -> 20,000 -> 80,000). */
+function nextLimit(max: number): number { return max * 4; }
+
+/** Why a read failed, in a few words for the list under the banner. */
+function shortReason(e: any): string {
+    const m = String(e?.message || e || 'error');
+    if (/timed? ?out|ETIMEDOUT/i.test(m)) return 'timeout';
+    const http = /\b(4\d\d|5\d\d)\b/.exec(m);
+    if (http) return 'HTTP ' + http[1];
+    if (/ENOTFOUND|ECONNRESET|ECONNREFUSED|socket/i.test(m)) return 'connection';
+    if (/not ?found|FileNotFound|EntryNotFound/i.test(m)) return 'not found';
+    return m.length > 40 ? m.slice(0, 40) + '…' : m;
+}
+
+/** All matches of the search in one file (read through the isfs folder). */
+async function scanFile(fileUri: vscode.Uri, searchRegex: RegExp): Promise<MatchResult[]> {
+    const fileBytes = await vscode.workspace.fs.readFile(fileUri);
+    const content = new TextDecoder('utf-8').decode(fileBytes);
+    const lines = content.split(/\r?\n/);
+    const matches: MatchResult[] = [];
+    const fileName = fileUri.path.split('/').pop() || 'Unknown';
+    // One regex per file instead of one per line - same matching
+    // behavior (reset lastIndex before each line), far fewer
+    // RegExp allocations on files with many lines.
+    const fileRegex = new RegExp(searchRegex.source, searchRegex.flags);
+    lines.forEach((lineText, lineIdx) => {
+        fileRegex.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = fileRegex.exec(lineText)) !== null) {
+            matches.push({ fileName, line: lineIdx, column: match.index, lineText: lineText.trim(), uri: fileUri.toString() });
+            // Guard against zero-length matches (e.g. a bare "*"
+            // wildcard) spinning forever at the same index.
+            if (match.index === fileRegex.lastIndex) fileRegex.lastIndex++;
+        }
+    });
+    return matches;
 }
 
 async function runWithConcurrency<T>(

@@ -1,5 +1,11 @@
 # Change Log
 
+## [1.10.0]
+
+- New: **the match limit is shown.** When a search reaches `isfsNamespaceSearch.serverSearchMaxResults` (5,000), a box above the results says there are more matches, with **Search again (up to 20,000)** - a higher limit for that one run only. The local scan now has the same limit (it had none: a broad search could list every line of the namespace).
+- New: **files the local scan could not read are listed**, with the reason, instead of being skipped silently while the search said "Complete". Each gets one quiet second try first. **Retry N failed** reads just those files again and adds what they match to the current results and to the search's history entry.
+- New: **bookmark notes.** Right-click a bookmark (or its pencil icon) > **Edit Bookmark Note...**. The note shows next to the bookmark, in its tooltip and when you hover the line; it moves with the bookmark as you edit.
+
 ## [1.9.1]
 
 - New: an **Open in Editor** row above Current Search's results (with the match and file counts). It shows once a

@@ -18,8 +18,12 @@ import * as vscode from 'vscode';
 
 type Logger = (message: string) => void;
 type BookmarkMap = { [uri: string]: number[] };
+/** Notes on bookmarks: uri -> line -> note. Kept beside the line numbers and moved with them. */
+type NoteMap = { [uri: string]: { [line: number]: string } };
 
 const STORAGE_KEY = 'isfsNamespaceSearch.bookmarks';
+const NOTES_KEY = 'isfsNamespaceSearch.bookmarkNotes';
+const NOTE_IN_ROW = 60;            // characters of a note shown in the sidebar row (all of it in the tooltip)
 const VIEW_ID = 'isfsNamespaceSearch.bookmarksView';
 const CMD = 'isfsNamespaceSearch.bookmarks';
 
@@ -74,6 +78,21 @@ export function shiftLine(line: number, change: { range: vscode.Range; text: str
 
 export function registerBookmarks(context: vscode.ExtensionContext, log: Logger) {
     let bookmarks: BookmarkMap = context.workspaceState.get<BookmarkMap>(STORAGE_KEY, {});
+    const notes: NoteMap = context.workspaceState.get<NoteMap>(NOTES_KEY, {});
+    const noteOf = (uri: string, line: number): string => notes[uri]?.[line] ?? '';
+    const setNote = (uri: string, line: number, text: string) => {
+        const t = text.trim();
+        if (t) (notes[uri] ??= {})[line] = t;
+        else if (notes[uri]) { delete notes[uri][line]; if (!Object.keys(notes[uri]).length) delete notes[uri]; }
+    };
+    /** Drops notes whose bookmark is gone. */
+    const pruneNotes = (uri?: string) => {
+        for (const u of uri ? [uri] : Object.keys(notes)) {
+            const keep = new Set(bookmarks[u] ?? []);
+            for (const l of Object.keys(notes[u] ?? {})) if (!keep.has(Number(l))) delete notes[u][Number(l)];
+            if (notes[u] && !Object.keys(notes[u]).length) delete notes[u];
+        }
+    };
 
     const decoration = vscode.window.createTextEditorDecorationType({
         gutterIconPath: vscode.Uri.parse(GUTTER_ICON),
@@ -90,7 +109,9 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
         const doSave = () => {
             saveTimer = undefined;
             for (const k of Object.keys(bookmarks)) if (!bookmarks[k].length) delete bookmarks[k];
+            pruneNotes();
             context.workspaceState.update(STORAGE_KEY, bookmarks);
+            context.workspaceState.update(NOTES_KEY, notes);
         };
         if (immediate) doSave();
         else saveTimer = setTimeout(doSave, 500);
@@ -119,11 +140,18 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
     }
 
     class BookmarkItem extends vscode.TreeItem {
-        constructor(label: string, public readonly uri: vscode.Uri, public readonly line: number, preview: string) {
+        constructor(label: string, public readonly uri: vscode.Uri, public readonly line: number, preview: string, note: string) {
             super(label, vscode.TreeItemCollapsibleState.None);
-            this.description = `line ${line + 1}`;
-            this.tooltip = preview || `line ${line + 1}`;
-            this.iconPath = new vscode.ThemeIcon('bookmark');
+            const short = note.replace(/\s+/g, ' ');
+            this.description = note
+                ? `${short.length > NOTE_IN_ROW ? short.slice(0, NOTE_IN_ROW - 1) + '…' : short} · line ${line + 1}`
+                : `line ${line + 1}`;
+            const tip = new vscode.MarkdownString();
+            if (note) { tip.appendText(note); tip.appendMarkdown('\n\n---\n\n'); }
+            tip.appendCodeblock(preview || `line ${line + 1}`, 'objectscript');
+            if (!note) tip.appendMarkdown('\n\n_Right-click > Edit Note… to add a note._');
+            this.tooltip = tip;
+            this.iconPath = new vscode.ThemeIcon(note ? 'note' : 'bookmark');
             this.contextValue = 'bookmarkItem';
             this.command = { command: `${CMD}.reveal`, title: 'Go to bookmark', arguments: [uri, line] };
         }
@@ -165,7 +193,7 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
                     // Document unavailable (server down, deleted): still list the lines.
                 }
                 const isClass = /\.cls$/i.test(el.uri.path);
-                return lines.map((l) => new BookmarkItem(labelFor(text, l, isClass), el.uri, l, (text[l] ?? '').trim()));
+                return lines.map((l) => new BookmarkItem(labelFor(text, l, isClass), el.uri, l, (text[l] ?? '').trim(), noteOf(el.uri.toString(), l)));
             }
             return [];
         }
@@ -177,8 +205,19 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
     // ---- decorations ----
     const decorate = (editor: vscode.TextEditor) => {
         if (!isIsfs(editor.document.uri)) return;
-        const lines = bookmarks[editor.document.uri.toString()] ?? [];
-        editor.setDecorations(decoration, lines.map((l) => new vscode.Range(l, 0, l, 0)));
+        const key = editor.document.uri.toString();
+        const lines = bookmarks[key] ?? [];
+        const doc = editor.document;
+        editor.setDecorations(decoration, lines.filter(l => l < doc.lineCount).map((l): vscode.DecorationOptions => {
+            const note = noteOf(key, l);
+            // with a note, hovering the line shows it
+            if (!note) return { range: new vscode.Range(l, 0, l, 0) };
+            const md = new vscode.MarkdownString();
+            md.appendMarkdown('$(bookmark) **Bookmark**\n\n');
+            md.appendText(note);
+            md.supportThemeIcons = true;
+            return { range: doc.lineAt(l).range, hoverMessage: md };
+        }));
     };
     const decorateUri = (uri: string) => {
         for (const ed of vscode.window.visibleTextEditors) if (ed.document.uri.toString() === uri) decorate(ed);
@@ -201,10 +240,21 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
             // Changes don't overlap and refer to the pre-edit document, so
             // apply them bottom-up to keep earlier positions valid.
             const changes = [...e.contentChanges].sort((a, b) => b.range.start.compareTo(a.range.start));
-            let lines = current;
-            for (const c of changes) lines = lines.map((l) => shiftLine(l, c)).filter((l) => l >= 0);
             const maxLine = e.document.lineCount - 1;
-            lines = [...new Set(lines.map((l) => Math.min(l, maxLine)))].sort((a, b) => a - b);
+            // where each bookmarked line went (-1: deleted), so its note goes along
+            const moved = new Map<number, number>();
+            for (const old of current) {
+                let l = old;
+                for (const c of changes) { if (l < 0) break; l = shiftLine(l, c); }
+                moved.set(old, l < 0 ? -1 : Math.min(l, maxLine));
+            }
+            const lines = [...new Set([...moved.values()].filter((l) => l >= 0))].sort((a, b) => a - b);
+            if (notes[key]) {
+                const before = notes[key];
+                const after: { [line: number]: string } = {};
+                for (const [old, nl] of moved) if (nl >= 0 && before[old] && !after[nl]) after[nl] = before[old];
+                if (Object.keys(after).length) notes[key] = after; else delete notes[key];
+            }
 
             const same = lines.length === current.length && lines.every((l, i) => l === current[i]);
             if (same) return;
@@ -251,6 +301,31 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
             const allMarked = cursorLines.every((l) => set.has(l));
             for (const l of cursorLines) allMarked ? set.delete(l) : set.add(l);
             bookmarks[key] = [...set].sort((a, b) => a - b);
+            pruneNotes(key);
+            changed(key, true);
+        }),
+
+        // Right-click a bookmark > Edit Note... (or from the editor: the bookmark on the cursor's line; the line
+        // gets a bookmark if it has none)
+        vscode.commands.registerCommand(`${CMD}.editNote`, async (item?: BookmarkItem) => {
+            let uri: vscode.Uri | undefined;
+            let line: number | undefined;
+            if (item instanceof BookmarkItem) { uri = item.uri; line = item.line; }
+            else {
+                const editor = vscode.window.activeTextEditor;
+                if (!editor || !isIsfs(editor.document.uri)) return;
+                uri = editor.document.uri; line = editor.selection.active.line;
+            }
+            const key = uri.toString();
+            const value = await vscode.window.showInputBox({
+                title: `Bookmark note · ${docNameOf(uri)} line ${line + 1}`,
+                prompt: 'Shown next to the bookmark in the sidebar, and when you hover the line. Empty = no note.',
+                value: noteOf(key, line),
+                ignoreFocusOut: true
+            });
+            if (value === undefined) return;
+            if (!(bookmarks[key] ?? []).includes(line)) bookmarks[key] = [...(bookmarks[key] ?? []), line].sort((a, b) => a - b);
+            setNote(key, line, value);
             changed(key, true);
         }),
 
@@ -268,6 +343,7 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
             const uri = item instanceof FileItem ? item.uri : vscode.window.activeTextEditor?.document.uri;
             if (!uri || !isIsfs(uri)) return;
             delete bookmarks[uri.toString()];
+            delete notes[uri.toString()];
             changed(uri.toString(), true);
         }),
 
@@ -276,6 +352,7 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
             for (const k of Object.keys(bookmarks)) {
                 if (vscode.Uri.parse(k).authority === item.authority) {
                     delete bookmarks[k];
+                    delete notes[k];
                     decorateUri(k);
                 }
             }
@@ -287,6 +364,7 @@ export function registerBookmarks(context: vscode.ExtensionContext, log: Logger)
             if (!(item instanceof BookmarkItem)) return;
             const key = item.uri.toString();
             bookmarks[key] = (bookmarks[key] ?? []).filter((l) => l !== item.line);
+            pruneNotes(key);
             changed(key, true);
         }),
 
